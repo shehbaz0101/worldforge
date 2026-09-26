@@ -3,19 +3,26 @@
 ``zero`` applies a zero dose. ``random`` draws each dose component uniformly
 inside the environment's action bounds from ``random.Random(seed)``. That
 generator is separate from the environment's initial-state generator, so the
-action sequence does not depend on how ``reset`` consumes its seed. Both
-policies are deterministic given the seed. Nothing here uses the network.
+action sequence does not depend on how ``reset`` consumes its seed. ``sine_dose``
+is an open-loop schedule: component ``i`` is a sine of the step index with phase
+``i * pi / 2``, scaled to the action bounds. It does not use the seed. The seed
+still fixes the initial state. All three policies are deterministic given the
+seed. Nothing here uses the network.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Literal
 
 from worldforge.envs.protocol import DynamicsEnv
 from worldforge.schemas import Action, Observation, Trajectory, Transition
 
-Policy = Literal["zero", "random"]
+Policy = Literal["zero", "random", "sine_dose"]
+POLICIES: tuple[Policy, ...] = ("zero", "random", "sine_dose")
+# One open-loop cycle every 16 environment steps.
+SINE_PERIOD_STEPS = 16
 
 
 def rollout(
@@ -36,16 +43,17 @@ def rollout(
         raise ValueError("n_steps must be an int >= 1")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("seed must be an int")
-    if policy not in ("zero", "random"):
-        raise ValueError("policy must be 'zero' or 'random'")
+    if policy not in POLICIES:
+        names = ", ".join(POLICIES)
+        raise ValueError(f"policy must be one of: {names}")
 
     observation = env.reset(seed)
     if env.seed != seed:
         raise RuntimeError("env returned a different seed than the one requested")
     rng = random.Random(seed)
     transitions: list[Transition] = []
-    for _ in range(n_steps):
-        action = _policy_action(env, policy, rng)
+    for step_index in range(n_steps):
+        action = _policy_action(env, policy, rng, step_index)
         t_before = env.t
         next_observation, reward, terminated, truncated, _info = env.step(action)
         transitions.append(
@@ -116,15 +124,32 @@ def _policy_action(
     env: DynamicsEnv,
     policy: Policy,
     rng: random.Random,
+    step_index: int,
 ) -> tuple[float, ...]:
-    if policy == "zero":
-        return tuple(0.0 for _ in range(env.action_dim))
     if len(env.action_low) != env.action_dim or len(env.action_high) != env.action_dim:
         raise ValueError("action bounds must match action_dim")
+    if policy == "zero":
+        return tuple(0.0 for _ in range(env.action_dim))
+    if policy == "sine_dose":
+        return _sine_action(env, step_index)
     return tuple(
         rng.uniform(low, high)
         for low, high in zip(env.action_low, env.action_high, strict=True)
     )
+
+
+def _sine_action(env: DynamicsEnv, step_index: int) -> tuple[float, ...]:
+    """Open-loop dose. Quadrature phases keep a 2D action from collapsing to one wave."""
+
+    actions: list[float] = []
+    for index, (low, high) in enumerate(zip(env.action_low, env.action_high, strict=True)):
+        midpoint = 0.5 * (low + high)
+        amplitude = 0.5 * (high - low)
+        phase = index * math.pi / 2.0
+        angle = (2.0 * math.pi * step_index) / SINE_PERIOD_STEPS + phase
+        value = midpoint + amplitude * math.sin(angle)
+        actions.append(min(max(value, low), high))
+    return tuple(actions)
 
 
 def _format_observation(observation: Observation) -> str:
