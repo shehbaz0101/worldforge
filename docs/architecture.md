@@ -1,11 +1,12 @@
 # Architecture
 
 WorldForge is a latent world model for a scientific dynamics sandbox. The
-target pipeline learns a compact state from trajectories, rolls it forward,
+v0.1.0 pipeline learns a compact state from trajectories, rolls it forward,
 plans with that model, and scores prediction and control offline. The
 environment, the trajectory record, an offline dataset builder, a latent
 model, a one-step training loop, an open-loop prediction eval, a
-model-based planner, and an HTTP API over those reports are in the tree.
+model-based planner, an HTTP API, and `worldforge demo` are in the tree.
+[PROJECT_STATUS.md](../PROJECT_STATUS.md) is the freeze note.
 
 ## Components
 
@@ -48,8 +49,8 @@ before that extra. The HTTP API is local and offline-by-design. Importing
 it installs a socket guard that refuses non-loopback TCP connects. It does
 not download weights. User paths stay inside the data root. The expensive
 POST routes share a per-client rate limit (HTTP 429, `Retry-After`).
-`GET /health` is not limited. There is no authentication yet. There is no
-multi-step training loss in this revision.
+`GET /health` is not limited. There is no authentication in v0.1.0. There is no
+multi-step training loss in v0.1.0.
 
 ## Default environment
 
@@ -462,10 +463,11 @@ train`. The printed summary is also `summary.txt` in the output directory.
 The JSON reports stay `worldforge.predict.v1`, `worldforge.action_sequence.v1`,
 and `worldforge.plan.v1`.
 
-## Where later days attach
+## After v0.1.0
 
-A later day can add authentication. A multi-step training loss can
-backprop through `rollout_latent`. The CLI still fits every episode in
-`--data` when training; holding out val and test stays with
+v0.1.0 stops here. Authentication and a multi-step training loss are not
+in this release. A later change can add authentication, and a multi-step
+loss can backprop through `rollout_latent`. The CLI still fits every
+episode in `--data` when training; holding out val and test stays with
 `split_trajectories`. The HTTP API is `worldforge serve`. The newcomer
 loop is `worldforge demo`.
