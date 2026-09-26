@@ -4,8 +4,8 @@ WorldForge is a latent world model for a scientific dynamics sandbox. The
 target pipeline learns a compact state from trajectories, rolls it forward,
 plans with that model, and scores prediction and control offline. The
 environment, the trajectory record, an offline dataset builder, a latent
-model, a one-step training loop, an open-loop prediction eval, and a
-model-based planner are in the tree. The HTTP API is a later day.
+model, a one-step training loop, an open-loop prediction eval, a
+model-based planner, and an HTTP API over those reports are in the tree.
 
 ## Components
 
@@ -22,6 +22,9 @@ flowchart LR
   rolloutEval --> metrics[Horizon MSE]
   dynamics --> planner[Planner]
   planner --> control[Control eval]
+  metrics --> api[HTTP API]
+  control --> api
+  train --> api
 ```
 
 | Component | Shipped | Later |
@@ -35,11 +38,13 @@ flowchart LR
 | Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | A multi-step rollout loss is later. |
 | Planner | Shipped. CEM over a short clipped action sequence, scored by latent rollouts. `worldforge plan`. | A learned reward, or a longer horizon, is later. |
 | Eval | Shipped. Open-loop latent rollout and per-horizon MSE (`worldforge rollout`, `worldforge eval-predict`). Closed-loop planning regret (`worldforge eval-plan`). | Holding out val and test inside the eval commands is still up to the caller. |
+| API | Shipped. FastAPI. `worldforge serve`. `GET /health`, `POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`, `POST /train`. | Authentication, rate limits, and a path sandbox are later. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
-pretrained weight file. Model, train, and prediction tests need the optional
-`ml` extra (`torch` and `numpy`). CI installs a CPU build of torch before
-that extra. There is no FastAPI app and no paid API. There is no multi-step
+pretrained weight file. Model, train, prediction, planning, and API tests need
+the optional `ml` extra (`torch` and `numpy`). CI installs a CPU build of torch
+before that extra. The HTTP API is local. It does not call out and it does not
+download weights. There is no authentication yet. There is no multi-step
 training loss in this revision.
 
 ## Default environment
@@ -375,9 +380,48 @@ finishes in about a second.
 | `actions` | Executed doses, length `planner_steps`. |
 | `checkpoint` | Checkpoint path, or `null`. |
 
+## HTTP API
+
+`src/worldforge/api/` is the Day 7 service. `worldforge serve` loads
+`worldforge.api:app` with uvicorn. The default bind is `127.0.0.1:8000`.
+`--host` and `--port` change it. `--reload` restarts when source files
+change. The process does not open an outbound connection.
+
+Importing `worldforge.api` loads FastAPI and does not load PyTorch.
+`GET /health` returns `status: ok` and the package version. The other
+routes import the `ml` extra when called. A missing torch install is
+HTTP 503. A bad body, a missing path, or a reserved `rssm` dynamics name
+is HTTP 422. There is no API key and no rate limit.
+
+| Route | Body | Response |
+| --- | --- | --- |
+| `GET /health` | | `status`, `version`. No model load. |
+| `POST /rollout`, `POST /eval/predict` | `data` path or inline `trajectories`. `checkpoint` or `seed` plus architecture fields. Optional `horizon`. | `worldforge.predict.v1`. Inline input is `data: "inline"`. |
+| `POST /plan` | `observation`, or `data` plus `episode`, or neither (the regulation target). CEM fields and an optional `checkpoint`. | `worldforge.action_sequence.v1`. |
+| `POST /eval/plan` | `n_steps`, `env_seed`, CEM fields, optional `checkpoint`. | `worldforge.plan.v1`. |
+| `POST /train` | `data` or inline `trajectories`. Optional `out`. Short optimizer fields. | `final_train_loss` and the checkpoint directory. |
+
+`/rollout` and `/eval/predict` call `open_loop_metrics`. `/plan` calls
+`plan_actions`. `/eval/plan` calls `planning_regret`. `/train` calls
+`train_world_model`. A checkpoint directory supplies `config.json` and
+the architecture fields on that request are ignored. Without a
+checkpoint, `seed` initializes the weights. On `/plan` and `/eval/plan`
+that same `seed` also draws the CEM samples, matching the CLI.
+
+The HTTP trainer is capped so a TestClient call stays short: `epochs` at
+most 5 (default 1), `steps_per_epoch` at most 8 (default 1), `batch_size`
+default 1, `device` `cpu` only. `out` omitted creates a temporary
+directory and returns that path. The CLI `worldforge train` is not capped
+and still runs the coverage pass. Request models reject unknown fields.
+
+The unit tests use FastAPI's `TestClient`. They do not bind a socket and
+they are not marked `integration`. The dev extra installs `httpx2`, which
+Starlette prefers when it is installed.
+
 ## Where later days attach
 
-Day 7 can put the checkpoint and these reports behind an HTTP API. A
-multi-step training loss can backprop through `rollout_latent`. The CLI
-still fits every episode in `--data` when training; holding out val and
-test stays with `split_trajectories`. There is still no HTTP API.
+A later day can add authentication, rate limits, and a sandbox around
+checkpoint paths. A multi-step training loss can backprop through
+`rollout_latent`. The CLI still fits every episode in `--data` when
+training; holding out val and test stays with `split_trajectories`. The
+HTTP API is `worldforge serve`.

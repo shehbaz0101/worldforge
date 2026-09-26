@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision adds a Day 6 model-based planner on top of the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision adds a Day 7 HTTP API on top of the Day 6 planner, the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. `worldforge serve` exposes that same loop over HTTP and binds to localhost. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-The environment, schema, and corpus commands do not need PyTorch. The model, the trainer, the open-loop eval, and the planner need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
+The environment, schema, and corpus commands do not need PyTorch. FastAPI and uvicorn are installed with the package, so `worldforge serve` and `GET /health` do not need PyTorch either. The model, the trainer, the open-loop eval, the planner, and the predict, plan, and train HTTP routes need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -171,6 +171,61 @@ report = planning_regret(model, n_steps=4, env_seed=0, cem=CEMConfig(seed=0))
 print(report.planner_return, report.zero_return, report.random_return, report.regret)
 ```
 
+## HTTP API
+
+`worldforge serve` runs the FastAPI app. The default bind is `127.0.0.1:8000`. `--host` and `--port` change it. The process does not open an outbound connection and does not download weights. Paths in the JSON body are local files. There is no authentication and no rate limit in this revision.
+
+`GET /health` returns `{"status": "ok", "version": ...}` and does not import torch. The other routes need the `ml` extra. If torch is missing they return HTTP 503. A bad body or a missing path is HTTP 422.
+
+`POST /rollout` and `POST /eval/predict` are the same call. The body is a corpus path (`data`) or a list of trajectory documents (`trajectories`), plus either a `checkpoint` directory or a `seed` and the architecture fields. `horizon` caps the score. The response is `worldforge.predict.v1`, the same JSON the CLI writes. Inline episodes are recorded as `data: "inline"`. When `checkpoint` is set, the architecture fields are ignored.
+
+`POST /plan` returns `worldforge.action_sequence.v1`. `observation` is the start state. `data` uses the first observation of one stored episode instead. With neither, the start is the regulation target, `(1, 1)` for the default width. `seed`, `horizon`, `n_samples`, `n_iterations`, and `elite_fraction` are the CEM settings. The CLI flags `--samples` and `--iterations` are `n_samples` and `n_iterations` here, matching the report.
+
+`POST /eval/plan` returns `worldforge.plan.v1`. `n_steps` is the closed-loop length. `env_seed` resets the environment and seeds the random baseline. `seed` is the CEM seed. Defaults match `worldforge eval-plan` (4 steps, horizon 3, 8 samples, 2 iterations).
+
+`POST /train` is a short CPU fit, not the unbounded CLI trainer. The default is 1 epoch, 1 step, and batch size 1. `epochs` is at most 5 and `steps_per_epoch` is at most 8. The response is `final_train_loss` and the checkpoint directory. `out` chooses that directory. When `out` is omitted the server creates a temporary directory and returns its path. The caller deletes it. Longer runs stay on `worldforge train`.
+
+```bash
+worldforge serve
+worldforge serve --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s http://127.0.0.1:8000/health
+
+curl -s -X POST http://127.0.0.1:8000/eval/predict \
+  -H 'content-type: application/json' \
+  -d '{"data":"tests/fixtures/trajectories","horizon":4,"seed":0}'
+
+curl -s -X POST http://127.0.0.1:8000/plan \
+  -H 'content-type: application/json' \
+  -d '{"observation":[1.5,0.6],"horizon":3,"n_samples":8,"n_iterations":2,"seed":0}'
+
+curl -s -X POST http://127.0.0.1:8000/eval/plan \
+  -H 'content-type: application/json' \
+  -d '{"n_steps":4,"env_seed":0,"horizon":3,"n_samples":8,"n_iterations":2,"seed":0}'
+
+curl -s -X POST http://127.0.0.1:8000/train \
+  -H 'content-type: application/json' \
+  -d '{"data":"tests/fixtures/trajectories","epochs":1,"steps_per_epoch":1,"out":"checkpoints/api-smoke"}'
+```
+
+```python
+from fastapi.testclient import TestClient
+
+from worldforge.api import app
+
+with TestClient(app) as client:
+    assert client.get("/health").json()["status"] == "ok"
+    plan = client.post(
+        "/plan",
+        json={"observation": [1.5, 0.6], "horizon": 2, "n_samples": 4, "n_iterations": 1},
+    )
+    print(plan.json()["actions"], plan.json()["predicted_return"])
+```
+
+`TestClient` is how the unit tests call the app. They do not bind a port. The dev extra installs `httpx2`, which Starlette uses when it is present. `import worldforge` does not import the API or torch. `import worldforge.api` imports FastAPI and does not import torch.
+
 ## Roadmap
 
 1. **Day 1 — Scaffold.** Kinetic environment, trajectory schema, CLI, pytest CI.
@@ -178,9 +233,9 @@ print(report.planner_return, report.zero_return, report.random_return, report.re
 3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint.
 4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`.
 5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`.
-6. **Day 6 — Planner.** CEM on latent rollouts, closed-loop regret against the zero dose and a random dose, `worldforge plan` / `worldforge eval-plan`. This revision.
-7. **Day 7 — HTTP API.** A FastAPI service over the checkpoint and the reports.
-8. **Later.** Multi-step rollout loss, and a longer saved training run.
+6. **Day 6 — Planner.** CEM on latent rollouts, closed-loop regret against the zero dose and a random dose, `worldforge plan` / `worldforge eval-plan`.
+7. **Day 7 — HTTP API.** FastAPI service: health, open-loop metrics, one CEM plan, closed-loop regret, and a short train. `worldforge serve`. This revision.
+8. **Later.** Request hardening, a multi-step rollout loss, and a longer saved training run.
 
 ## Docs
 
@@ -191,6 +246,7 @@ print(report.planner_return, report.zero_return, report.random_return, report.re
 - [Day 4 log](docs/daily/2026-09-26-day4.md)
 - [Day 5 log](docs/daily/2026-09-26-day5.md)
 - [Day 6 log](docs/daily/2026-09-26-day6.md)
+- [Day 7 log](docs/daily/2026-09-26-day7.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -201,7 +257,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, and `tests/test_plan.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, `tests/test_plan.py`, and `tests/test_api.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. The API tests use FastAPI's `TestClient` (health, plan, predict, a one-step regret report, and a one-step train). They do not bind a port and they are not marked `integration`. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"
