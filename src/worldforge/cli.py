@@ -8,8 +8,10 @@ prints a trajectory summary plus the final ASCII state.
 ``model-info`` prints the Day 3 architecture sizes.
 ``forward-smoke`` runs one encode / step / decode. It does not train.
 ``train`` fits that model on an offline corpus and writes a checkpoint.
-Dataset commands do not import PyTorch. The model and train commands need
-the optional ``ml`` extra. None of these commands use the network.
+``rollout`` and ``eval-predict`` score an open-loop latent rollout and write
+a prediction report. Dataset commands do not import PyTorch. The model,
+train, and prediction commands need the optional ``ml`` extra. None of
+these commands use the network.
 """
 
 from __future__ import annotations
@@ -228,7 +230,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="adam or sgd (default: adam)",
     )
     _add_model_config_args(train)
+
+    rollout_cmd = subparsers.add_parser(
+        "rollout",
+        help="Open-loop latent rollout on a corpus; write a prediction report",
+    )
+    _add_predict_args(rollout_cmd)
+    predict = subparsers.add_parser(
+        "eval-predict",
+        help="Score open-loop MSE by horizon and write a JSON report",
+    )
+    _add_predict_args(predict)
     return parser
+
+
+def _add_predict_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="fixture directory, corpus JSONL, or one trajectory file",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="JSON report path (horizons, mse_by_h, n_episodes)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="checkpoint directory; when set, architecture flags are ignored",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="weight init seed when --checkpoint is omitted (default: 0)",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=None,
+        help="maximum horizon; default scores each episode to its last step",
+    )
+    _add_model_config_args(parser)
 
 
 def _add_model_config_args(parser: argparse.ArgumentParser) -> None:
@@ -282,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         return _forward_smoke(parser, args)
     if args.command == "train":
         return _train(parser, args)
+    if args.command in {"rollout", "eval-predict"}:
+        return _predict(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -431,6 +480,61 @@ def _train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return 2
     print(train_api.format_train_report(result))
     return 0
+
+
+def _predict(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if not args.data.exists():
+        parser.error(f"path does not exist: {args.data}")
+    if args.checkpoint is not None and not args.checkpoint.exists():
+        parser.error(f"path does not exist: {args.checkpoint}")
+    if args.seed < 0:
+        parser.error("--seed must be >= 0")
+    if args.horizon is not None and args.horizon < 1:
+        parser.error("--horizon must be >= 1")
+    world_model_cls, load_checkpoint, predict_api = _load_predict_runtime(parser)
+    try:
+        if args.checkpoint is None:
+            model = world_model_cls(_model_config_from_args(args), seed=args.seed)
+            checkpoint_note = None
+        else:
+            model = load_checkpoint(args.checkpoint)
+            checkpoint_note = str(args.checkpoint)
+        episodes = load_corpus(args.data)
+        report = predict_api.open_loop_metrics(
+            model,
+            episodes,
+            horizon=args.horizon,
+            checkpoint=checkpoint_note,
+            data=str(args.data),
+        )
+        predict_api.write_predict_report(args.out, report)
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(predict_api.format_predict_report(report))
+    print(f"report: {args.out}")
+    return 0
+
+
+def _load_predict_runtime(parser: argparse.ArgumentParser) -> tuple[type, object, object]:
+    """Import the world model and the prediction eval. ``parser.error`` exits without torch."""
+
+    _load_model_runtime(parser)
+    try:
+        world = importlib.import_module("worldforge.models.world")
+        checkpoint = importlib.import_module("worldforge.models.checkpoint")
+        predict_api = importlib.import_module("worldforge.eval")
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == "torch" or missing.startswith("torch."):
+            parser.error(
+                'model, train, and prediction commands need the optional ml extra: '
+                'pip install -e ".[ml]" '
+                "(a CPU build of torch is enough). "
+                f"Import failed: {exc}"
+            )
+        raise
+    return world.WorldModel, checkpoint.load_checkpoint, predict_api
 
 
 def _load_train_runtime(parser: argparse.ArgumentParser) -> tuple[type, object]:
