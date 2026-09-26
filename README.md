@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision adds the Day 4 training loop on top of the Day 3 latent model and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision adds Day 5 open-loop prediction on top of the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-The environment, schema, and corpus commands do not need PyTorch. The model and the trainer need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
+The environment, schema, and corpus commands do not need PyTorch. The model, the trainer, and the open-loop eval need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -106,18 +106,45 @@ restored = load_checkpoint("checkpoints/day4")
 
 `train_world_model` accepts any sequence of trajectories. Pass `split_trajectories(episodes, seed=0).train` to fit the train split only. The CLI trains every episode in `--data`.
 
+`rollout` and `eval-predict` score an open-loop latent rollout. The encoder runs on the first observation only. Each later step applies the stored action in latent space and decodes a predicted observation. Horizon 1 matches one-step `predict`. The JSON report lists `horizons`, `mse_by_h`, `mae_by_h`, `residual_std_by_h`, and `n_episodes`. `--checkpoint` loads a Day 4 directory. Without it, `--seed` builds an untrained model. `--horizon` caps the score; the default uses every stored step. On the golden fixtures that is 6 episodes and horizons 1..8, and the command does not train.
+
+```bash
+worldforge eval-predict \
+  --checkpoint checkpoints/day4 \
+  --data tests/fixtures/trajectories \
+  --out reports/predict.json \
+  --horizon 8
+
+worldforge rollout \
+  --data tests/fixtures/trajectories \
+  --out reports/untrained.json \
+  --seed 0 \
+  --horizon 4
+```
+
+```python
+from worldforge.data import load_corpus
+from worldforge.eval import open_loop_metrics, rollout_latent
+from worldforge.models import load_checkpoint
+
+model = load_checkpoint("checkpoints/day4")
+episodes = load_corpus("tests/fixtures/trajectories")
+report = open_loop_metrics(model, episodes, horizon=8, checkpoint="checkpoints/day4")
+print(report.horizons, report.mse_by_h, report.n_episodes)
+```
+
+`import worldforge` does not import torch. Importing `worldforge.eval` does.
+
 ## Roadmap
 
 1. **Day 1 — Scaffold.** Kinetic environment, trajectory schema, CLI, pytest CI.
 2. **Day 2 — Dataset.** Collect JSONL trajectories, split them, and sample a replay batch.
 3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint.
-4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`. This revision.
-5. **Day 5 — Multi-step loss.** Train on rolled-out latent trajectories.
-6. **Day 6 — Saved run.** A trained checkpoint on the offline split, using the Day 3 format.
-7. **Day 7 — Prediction eval.** Open-loop rollout error on held-out seeds.
-8. **Day 8 — Planner.** Model-based action search.
-9. **Day 9 — Control eval.** Offline return of the planner against the zero dose.
-10. **Day 10 — Freeze.** Status note and a pinned demo path.
+4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`.
+5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`. This revision.
+6. **Day 6 — Planner.** Model-based action search.
+7. **Day 7 — HTTP API.** A FastAPI service over the checkpoint and the prediction report.
+8. **Later.** Multi-step rollout loss, a longer saved training run, and offline control return against the zero dose.
 
 ## Docs
 
@@ -126,6 +153,7 @@ restored = load_checkpoint("checkpoints/day4")
 - [Day 2 log](docs/daily/2026-09-26-day2.md)
 - [Day 3 log](docs/daily/2026-09-26-day3.md)
 - [Day 4 log](docs/daily/2026-09-26-day4.md)
+- [Day 5 log](docs/daily/2026-09-26-day5.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -136,7 +164,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py` and `tests/test_train.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py`, `tests/test_train.py`, and `tests/test_predict.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"
