@@ -11,9 +11,12 @@ prints a trajectory summary plus the final ASCII state.
 ``rollout`` and ``eval-predict`` score an open-loop latent rollout and write
 a prediction report. ``plan`` searches one action sequence with CEM.
 ``eval-plan`` rolls that planner on the environment and writes planning
-regret against a zero dose and a random dose. Dataset commands do not
-import PyTorch. The model, train, prediction, and planning commands need
-the optional ``ml`` extra. None of these commands use the network.
+regret against a zero dose and a random dose. ``serve`` runs the HTTP API
+on localhost (``GET /health``, ``POST /rollout``, ``POST /eval/predict``,
+``POST /plan``, ``POST /eval/plan``, ``POST /train``). Dataset commands do
+not import PyTorch. The model, train, prediction, and planning commands,
+and those HTTP routes, need the optional ``ml`` extra. ``serve`` and
+``GET /health`` do not. None of these commands use the network.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import sys
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -256,6 +260,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Closed-loop planning regret against zero and random doses",
     )
     _add_plan_args(eval_plan, closed_loop=True)
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="Run the HTTP API (health, rollout, plan, train)",
+    )
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1)",
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="bind port (default: 8000)",
+    )
+    serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="reload when source files change",
+    )
     return parser
 
 
@@ -427,8 +452,35 @@ def main(argv: list[str] | None = None) -> int:
         return _plan(parser, args)
     if args.command == "eval-plan":
         return _eval_plan(parser, args)
+    if args.command == "serve":
+        return _serve(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
+
+
+def _serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Bind the HTTP API. Does not open an outbound connection."""
+
+    host = str(args.host).strip()
+    if not host:
+        parser.error("--host must not be empty")
+    if args.port < 1 or args.port > 65535:
+        parser.error("--port must be between 1 and 65535")
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "error: uvicorn is not installed. Reinstall WorldForge to run the API.",
+            file=sys.stderr,
+        )
+        return 1
+    uvicorn.run(
+        "worldforge.api:app",
+        host=host,
+        port=args.port,
+        reload=bool(args.reload),
+    )
+    return 0
 
 
 def _env_demo(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
