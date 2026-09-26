@@ -1,75 +1,90 @@
 # Project status
 
-WorldForge is Project B: a research-grade latent world model for a scientific
-dynamics sandbox. The aim is compact state dynamics learned from trajectories,
-multi-step rollouts, model-based planning, and offline prediction and control
-evals.
+WorldForge is a research-grade latent world model for a scientific dynamics
+sandbox. It learns a compact state from Lotka-Volterra trajectories, rolls
+that state forward, plans with CEM, and records open-loop prediction and
+closed-loop regret. The same loop is a CLI and a localhost FastAPI service.
+An offline demo trains on a checked-in sample corpus.
 
-**Status:** Day 9.
+**Status:** Project B is frozen at v0.1.0.
 
-Day 1 added the package, the default Lotka-Volterra environment, the
-trajectory schema, and pytest CI on Python 3.11 and 3.12. Day 2 collects
-offline trajectory corpora (`worldforge collect`), summarizes them
-(`worldforge dataset-info`), and splits them into train, val, and test.
-Golden episodes live in `tests/fixtures/trajectories/` so CI stays offline.
-Day 3 adds a CPU latent model: an MLP encoder, a deterministic residual-MLP
-dynamics baseline, a small decoder, and `WorldModel` (`encode`, `step`,
-`decode`, `predict`). `save_checkpoint` writes `config.json` and `weights.pt`
-(`worldforge.checkpoint.v1`). Day 4 trains that model on stored transitions.
-The loss is one-step observation MSE plus an optional reconstruction term.
-`worldforge train` runs Adam or SGD on CPU, prints `final_train_loss`, and
-writes the Day 3 checkpoint plus `metrics.jsonl` and `train.json`. Day 5
-rolls a checkpoint, or an untrained seeded model, open-loop on stored
-actions and decodes predicted observations at horizons 1..H. `worldforge
-rollout` and `worldforge eval-predict` write `worldforge.predict.v1` with
-`horizons`, `mse_by_h`, and `n_episodes` (plus MAE and a residual standard
-deviation by horizon). Day 6 plans with that model. CEM searches a short
-clipped action sequence. The objective is `regulation_l1`: the
-undiscounted sum of Lotka-Volterra regulation rewards on decoded states,
-the same negative L1 distance from `(1, 1)` that the environment returns.
-`worldforge plan` writes one sequence (`worldforge.action_sequence.v1`).
-`worldforge eval-plan` replans on the real environment for a few steps
-and writes `worldforge.plan.v1`. `regret` is `baseline_best -
-planner_return`, where `baseline_best` is the better of a zero dose and
-the Day 1 random dose. Negative regret means the planner beat both.
-Torch is the optional `ml` extra. See
-[docs/daily/2026-09-26-day6.md](docs/daily/2026-09-26-day6.md).
+## Days 1–10
 
-Day 7 serves that loop over HTTP. `worldforge serve` binds to `127.0.0.1:8000`
-by default and does not open an outbound connection. `GET /health` returns
-`ok` and the package version without loading torch. `POST /rollout` and
-`POST /eval/predict` return `worldforge.predict.v1` from a checkpoint or a
-seed, and from a corpus path or a small inline trajectory list. `POST /plan`
-returns `worldforge.action_sequence.v1`. `POST /eval/plan` returns
-`worldforge.plan.v1`. `POST /train` runs a short CPU fit (at most 5 epochs
-and 8 steps per epoch) and returns `final_train_loss` plus the checkpoint
-directory. FastAPI and uvicorn are core dependencies. The predict, plan, and
-train routes need the `ml` extra and answer 503 when it is missing. See
-[docs/daily/2026-09-26-day7.md](docs/daily/2026-09-26-day7.md).
+| Day | Delivered |
+| --- | --- |
+| 1 | Package scaffold, Lotka-Volterra env, trajectory schema, pytest CI |
+| 2 | Offline corpus (`worldforge collect`, `dataset-info`), splits, fixtures |
+| 3 | MLP encoder, residual dynamics, decoder, `WorldModel`, checkpoints |
+| 4 | One-step training loop and `worldforge train` |
+| 5 | Multi-horizon rollout and `worldforge rollout` / `eval-predict` |
+| 6 | CEM planner and closed-loop regret (`worldforge plan` / `eval-plan`) |
+| 7 | FastAPI service and `worldforge serve` |
+| 8 | Path sandbox, per-client rate limit, offline socket guard |
+| 9 | `worldforge demo` on `samples/trajectories` |
+| 10 | Freeze at v0.1.0, this status note, changelog |
 
-Day 8 hardens that service for local use. Corpus, checkpoint, and output
-paths on the CLI and on the HTTP body must resolve inside `--data-root`
-(`WORLDFORGE_DATA_ROOT`, or the current directory). A `..` traversal, an
-absolute path outside that root, or a symlink that leaves it is a CLI
-error or HTTP 422. `POST /rollout`, `POST /eval/predict`, `POST /plan`,
-`POST /eval/plan`, and `POST /train` share a per-client limit, 60 requests
-per 60 seconds by default. Over the limit the response is HTTP 429 with
-`Retry-After`. `GET /health` is not limited. Importing the API installs a
-socket guard that refuses non-loopback connects, so the server does not
-download weights. There is still no authentication. See
-[docs/architecture.md](docs/architecture.md) and
-[docs/daily/2026-09-26-day8.md](docs/daily/2026-09-26-day8.md).
+## Install
 
-Day 9 is the newcomer path. `worldforge demo` reads `samples/demo.json`
-and the two-episode corpus in `samples/trajectories/` (horizon 4, policies
-`zero` and `random`). It trains a small CPU checkpoint (latent width 4,
-one epoch, one replay step), scores an open-loop rollout, plans one short
-action sequence, and writes closed-loop regret against the zero dose and
-the random dose. The command prints those metrics and writes them under
-`demo-run/` unless `--out` is set. The fit is capped the same way as
-`POST /train` (at most 5 epochs and 8 steps per epoch). Paths stay inside
-the Day 8 data root. If the sample corpus is outside that root it is
-copied into the output directory; if the files are missing the same
-episodes are collected there. Torch stays the `ml` extra. Without it the
-command exits with the same install hint as `worldforge train`. See
-[docs/daily/2026-09-26-day9.md](docs/daily/2026-09-26-day9.md).
+Python 3.11 or newer. Install a CPU build of torch first so the extra does
+not pull a CUDA wheel:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[ml]"
+```
+
+`worldforge demo`, `worldforge train`, the open-loop eval, the planner, and
+the predict, plan, and train HTTP routes need that extra. The environment,
+the schema, the corpus commands, `worldforge serve`, and `GET /health` run
+from `pip install -e .` and do not import torch. Tests use
+`pip install -e ".[dev,ml]"`. Lint uses `pip install -e ".[lint]"`.
+
+## Quickstart
+
+```bash
+worldforge demo
+worldforge serve
+```
+
+`worldforge demo` reads `samples/demo.json` and the two-episode corpus in
+`samples/trajectories/`. It trains a small CPU checkpoint, scores an
+open-loop rollout, plans one short action sequence, and writes closed-loop
+regret. Output goes to `demo-run/` unless `--out` is set. `worldforge serve`
+binds to `127.0.0.1:8000` and does not open an outbound connection.
+
+## Tests and CI
+
+CI runs on pull requests and on pushes to `main`. The test job installs the
+CPU torch wheel, then `pip install -e ".[dev,ml]"`, and runs
+`pytest -m "not integration"` on Python 3.11 and 3.12. A lint job runs
+`ruff check .` (rules E4, E7, E9, F, I). No test is marked `integration`.
+HTTP tests use FastAPI `TestClient` and do not bind a port. Nothing in the
+suite downloads weights.
+
+## Known limits
+
+- CPU demo caps. `worldforge demo` and `POST /train` allow at most 5 epochs
+  and 8 steps per epoch. The demo defaults are one epoch and one replay step
+  on two episodes of horizon 4. A longer fit stays on `worldforge train`.
+- Localhost bind. `worldforge serve` defaults to `127.0.0.1:8000`. There is
+  no authentication.
+- Offline-by-design. Importing the API installs a socket guard that refuses
+  non-loopback connects. The package does not download weights.
+- Free and public only. No API keys, no paid services, and no private data.
+- `dynamics="rssm"` is reserved and raises `NotImplementedError`. Training
+  is one-step observation MSE, not a multi-step rollout loss.
+
+## Release tag
+
+`pyproject.toml` and `worldforge.__version__` are `0.1.0`. The annotated tag
+`v0.1.0` should point at the squash-merge commit of this freeze on `main`.
+A squash merge discards the branch tip, so the tag is not created on
+`feat/day10-freeze`. After the squash SHA is on `main`:
+
+```bash
+git fetch origin main
+git tag -a v0.1.0 <squash-sha> -m "WorldForge v0.1.0"
+git push origin v0.1.0
+```
+
+Do not force-update a tag that already exists.
