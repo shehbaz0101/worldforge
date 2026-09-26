@@ -56,5 +56,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["src"]
 markers = [
-    "integration: live checks for later days; Day 1 has none",
+    "integration: live checks for later days; none are registered yet",
 ]
