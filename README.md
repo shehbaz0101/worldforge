@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision adds the Day 3 latent model on top of the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision adds the Day 4 training loop on top of the Day 3 latent model and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-The environment, schema, and corpus commands do not need PyTorch. The Day 3 model needs the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
+The environment, schema, and corpus commands do not need PyTorch. The model and the trainer need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -72,12 +72,46 @@ restored = load_checkpoint("checkpoints/day3")
 
 The checkpoint directory is `config.json` plus `weights.pt`. It stores the config and the `state_dict`. It does not store an optimizer. Importing `worldforge` does not import torch; importing `WorldModel` does.
 
+`train` fits the baseline on a corpus and writes a checkpoint. The loss is the MSE of the one-step prediction, plus a reconstruction MSE scaled by `--recon-weight` (default 1; `0` trains prediction only). `--seed` fixes both the initial weights and the replay batches. `--device cpu` is the only accepted device. On the golden fixtures the defaults are 3 epochs and batch size 8 (6 batches per epoch) and the run finishes in a few seconds.
+
+```bash
+worldforge train \
+  --data tests/fixtures/trajectories \
+  --out checkpoints/day4 \
+  --epochs 3 \
+  --batch-size 8 \
+  --lr 1e-3 \
+  --seed 0 \
+  --device cpu
+```
+
+The command prints one line per epoch and `final_train_loss`. `checkpoints/day4` contains the Day 3 checkpoint files plus `metrics.jsonl` and `train.json`.
+
+```python
+from worldforge.data import load_corpus
+from worldforge.models import ModelConfig, WorldModel, load_checkpoint
+from worldforge.train import TrainConfig, train_world_model
+
+episodes = load_corpus("tests/fixtures/trajectories")
+model = WorldModel(ModelConfig(), seed=0)
+result = train_world_model(
+    model,
+    episodes,
+    TrainConfig(epochs=3, batch_size=8, lr=1e-3, seed=0, device="cpu"),
+    out="checkpoints/day4",
+)
+print(result.final_train_loss)
+restored = load_checkpoint("checkpoints/day4")
+```
+
+`train_world_model` accepts any sequence of trajectories. Pass `split_trajectories(episodes, seed=0).train` to fit the train split only. The CLI trains every episode in `--data`.
+
 ## Roadmap
 
 1. **Day 1 — Scaffold.** Kinetic environment, trajectory schema, CLI, pytest CI.
 2. **Day 2 — Dataset.** Collect JSONL trajectories, split them, and sample a replay batch.
-3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint. No training loop.
-4. **Day 4 — Training loop.** One-step loss and an optimizer around the Day 3 model.
+3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint.
+4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`. This revision.
 5. **Day 5 — Multi-step loss.** Train on rolled-out latent trajectories.
 6. **Day 6 — Saved run.** A trained checkpoint on the offline split, using the Day 3 format.
 7. **Day 7 — Prediction eval.** Open-loop rollout error on held-out seeds.
@@ -91,6 +125,7 @@ The checkpoint directory is `config.json` plus `weights.pt`. It stores the confi
 - [Day 1 log](docs/daily/2026-09-26.md)
 - [Day 2 log](docs/daily/2026-09-26-day2.md)
 - [Day 3 log](docs/daily/2026-09-26-day3.md)
+- [Day 4 log](docs/daily/2026-09-26-day4.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -101,7 +136,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py` imports torch, so the full suite needs the `ml` extra. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py` and `tests/test_train.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"

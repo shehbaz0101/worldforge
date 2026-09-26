@@ -1,7 +1,7 @@
 """World model wrapper: encode, step, decode, and one-step predict.
 
 ``forward`` is a pure tensor map. It does not sample a batch, zero a
-gradient, or call an optimizer. Day 4 can score
+gradient, or call an optimizer. The Day 4 trainer scores
 ``reconstructed`` against the current observation and
 ``predicted_observation`` against the next observation.
 """
