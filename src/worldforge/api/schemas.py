@@ -4,7 +4,8 @@ These models do not import PyTorch. A checkpoint path and a model spec
 are separate: when ``checkpoint`` is set, the architecture fields are
 ignored and the directory's ``config.json`` wins. Inline trajectories
 use the same :class:`~worldforge.schemas.trajectory.Trajectory` document
-as an episode JSON file.
+as an episode JSON file. Path strings are only stripped here. The service
+resolves them inside the data root and rejects escapes with HTTP 422.
 
 ``POST /train`` is a short run. The CLI trainer is not capped.
 """

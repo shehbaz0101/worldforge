@@ -5,7 +5,7 @@ dynamics sandbox. The aim is compact state dynamics learned from trajectories,
 multi-step rollouts, model-based planning, and offline prediction and control
 evals.
 
-**Status:** Day 7.
+**Status:** Day 8.
 
 Day 1 added the package, the default Lotka-Volterra environment, the
 trajectory schema, and pytest CI on Python 3.11 and 3.12. Day 2 collects
@@ -44,7 +44,18 @@ returns `worldforge.action_sequence.v1`. `POST /eval/plan` returns
 `worldforge.plan.v1`. `POST /train` runs a short CPU fit (at most 5 epochs
 and 8 steps per epoch) and returns `final_train_loss` plus the checkpoint
 directory. FastAPI and uvicorn are core dependencies. The predict, plan, and
-train routes need the `ml` extra and answer 503 when it is missing. There is
-no authentication and no rate limit yet. See
-[docs/architecture.md](docs/architecture.md) and
+train routes need the `ml` extra and answer 503 when it is missing. See
 [docs/daily/2026-09-26-day7.md](docs/daily/2026-09-26-day7.md).
+
+Day 8 hardens that service for local use. Corpus, checkpoint, and output
+paths on the CLI and on the HTTP body must resolve inside `--data-root`
+(`WORLDFORGE_DATA_ROOT`, or the current directory). A `..` traversal, an
+absolute path outside that root, or a symlink that leaves it is a CLI
+error or HTTP 422. `POST /rollout`, `POST /eval/predict`, `POST /plan`,
+`POST /eval/plan`, and `POST /train` share a per-client limit, 60 requests
+per 60 seconds by default. Over the limit the response is HTTP 429 with
+`Retry-After`. `GET /health` is not limited. Importing the API installs a
+socket guard that refuses non-loopback connects, so the server does not
+download weights. There is still no authentication. See
+[docs/architecture.md](docs/architecture.md) and
+[docs/daily/2026-09-26-day8.md](docs/daily/2026-09-26-day8.md).

@@ -1,8 +1,9 @@
 """HTTP API for the offline research loop.
 
-Importing this package loads FastAPI and does not load PyTorch.
-``GET /health`` never does. The predict, plan, and train routes import
-the optional ``ml`` extra when they are called.
+Importing this package loads FastAPI, installs the offline socket guard,
+and does not load PyTorch. ``GET /health`` never does. The predict, plan,
+and train routes import the optional ``ml`` extra when they are called.
+Those routes are rate limited. User file paths stay inside the data root.
 
 The FastAPI instance lives in :mod:`worldforge.api.server` and is
 re-exported here so ``uvicorn worldforge.api:app`` and

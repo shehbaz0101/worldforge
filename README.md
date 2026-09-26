@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision adds a Day 7 HTTP API on top of the Day 6 planner, the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. `worldforge serve` exposes that same loop over HTTP and binds to localhost. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision hardens the Day 7 HTTP API (path sandbox, rate limit, offline guard) on top of the Day 6 planner, the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. `worldforge serve` exposes that same loop over HTTP and binds to localhost. Corpus, checkpoint, and output paths stay inside a data root. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -173,9 +173,19 @@ print(report.planner_return, report.zero_return, report.random_return, report.re
 
 ## HTTP API
 
-`worldforge serve` runs the FastAPI app. The default bind is `127.0.0.1:8000`. `--host` and `--port` change it. The process does not open an outbound connection and does not download weights. Paths in the JSON body are local files. There is no authentication and no rate limit in this revision.
+`worldforge serve` runs the FastAPI app. The default bind is `127.0.0.1:8000`. `--host` and `--port` change it. WorldForge is offline-by-design: importing the API installs a socket guard that refuses non-loopback TCP connects, and the process does not download weights. Loopback stays open so a client on this machine can call the server. The guard stays on for the life of the process. There is no authentication.
 
-`GET /health` returns `{"status": "ok", "version": ...}` and does not import torch. The other routes need the `ml` extra. If torch is missing they return HTTP 503. A bad body or a missing path is HTTP 422.
+`GET /health` returns `{"status": "ok", "version": ...}` and does not import torch. It is not rate limited. The other routes need the `ml` extra. If torch is missing they return HTTP 503. A bad body, a missing path, or a path outside the data root is HTTP 422.
+
+User paths (`data`, `checkpoint`, `out`, and the same CLI flags) must resolve inside the data root. The root is `--data-root`, or `WORLDFORGE_DATA_ROOT`, or the current directory. Relative paths resolve against that root. Absolute paths are accepted only when they resolve inside it. `..` and symlinks are resolved before the check, so a traversal or a symlink that leaves the root is rejected. `POST /train` with `out` omitted creates the checkpoint directory inside the data root.
+
+`POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`, and `POST /train` share one in-process sliding window per client address. The default is 60 requests per 60 seconds. Over the limit the response is HTTP 429 with a `Retry-After` header (seconds). `TestClient` has no separate peer address, so those calls share one bucket. Knobs:
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `--data-root`, `WORLDFORGE_DATA_ROOT` | current directory | Allowed root for corpus, checkpoint, and output paths. |
+| `--rate-limit`, `WORLDFORGE_RATE_LIMIT` | 60 | Combined cap on the expensive POSTs, per client, per window. Minimum 1. |
+| `--rate-window`, `WORLDFORGE_RATE_WINDOW_SECONDS` | 60 | Window length in seconds. |
 
 `POST /rollout` and `POST /eval/predict` are the same call. The body is a corpus path (`data`) or a list of trajectory documents (`trajectories`), plus either a `checkpoint` directory or a `seed` and the architecture fields. `horizon` caps the score. The response is `worldforge.predict.v1`, the same JSON the CLI writes. Inline episodes are recorded as `data: "inline"`. When `checkpoint` is set, the architecture fields are ignored.
 
@@ -183,11 +193,11 @@ print(report.planner_return, report.zero_return, report.random_return, report.re
 
 `POST /eval/plan` returns `worldforge.plan.v1`. `n_steps` is the closed-loop length. `env_seed` resets the environment and seeds the random baseline. `seed` is the CEM seed. Defaults match `worldforge eval-plan` (4 steps, horizon 3, 8 samples, 2 iterations).
 
-`POST /train` is a short CPU fit, not the unbounded CLI trainer. The default is 1 epoch, 1 step, and batch size 1. `epochs` is at most 5 and `steps_per_epoch` is at most 8. The response is `final_train_loss` and the checkpoint directory. `out` chooses that directory. When `out` is omitted the server creates a temporary directory and returns its path. The caller deletes it. Longer runs stay on `worldforge train`.
+`POST /train` is a short CPU fit, not the unbounded CLI trainer. The default is 1 epoch, 1 step, and batch size 1. `epochs` is at most 5 and `steps_per_epoch` is at most 8. The response is `final_train_loss` and the checkpoint directory. `out` chooses that directory and must stay inside the data root. When `out` is omitted the server creates a directory inside the data root and returns its path. The caller deletes it. Longer runs stay on `worldforge train`.
 
 ```bash
 worldforge serve
-worldforge serve --host 127.0.0.1 --port 8000
+worldforge serve --host 127.0.0.1 --port 8000 --data-root . --rate-limit 60 --rate-window 60
 ```
 
 ```bash
@@ -234,8 +244,9 @@ with TestClient(app) as client:
 4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`.
 5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`.
 6. **Day 6 — Planner.** CEM on latent rollouts, closed-loop regret against the zero dose and a random dose, `worldforge plan` / `worldforge eval-plan`.
-7. **Day 7 — HTTP API.** FastAPI service: health, open-loop metrics, one CEM plan, closed-loop regret, and a short train. `worldforge serve`. This revision.
-8. **Later.** Request hardening, a multi-step rollout loss, and a longer saved training run.
+7. **Day 7 — HTTP API.** FastAPI service: health, open-loop metrics, one CEM plan, closed-loop regret, and a short train. `worldforge serve`.
+8. **Day 8 — Hardening.** Path sandbox, in-process rate limits, offline socket guard. This revision.
+9. **Later.** A multi-step rollout loss, and a longer saved training run.
 
 ## Docs
 
@@ -247,6 +258,7 @@ with TestClient(app) as client:
 - [Day 5 log](docs/daily/2026-09-26-day5.md)
 - [Day 6 log](docs/daily/2026-09-26-day6.md)
 - [Day 7 log](docs/daily/2026-09-26-day7.md)
+- [Day 8 log](docs/daily/2026-09-26-day8.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -257,7 +269,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, `tests/test_plan.py`, and `tests/test_api.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. The API tests use FastAPI's `TestClient` (health, plan, predict, a one-step regret report, and a one-step train). They do not bind a port and they are not marked `integration`. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, `tests/test_plan.py`, and `tests/test_api.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. The API tests use FastAPI's `TestClient` (health, plan, predict, a one-step regret report, a one-step train, path escapes, and HTTP 429). They do not bind a port and they are not marked `integration`. Pytest keeps its temporary directory under `.pytest-tmp` in the current directory so those paths stay inside the default data root. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"
