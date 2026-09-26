@@ -42,9 +42,8 @@ class _StrictModel(BaseModel):
 class ModelConfig(_StrictModel):
     """Sizes and the dynamics variant for one :class:`WorldModel`.
 
-    Hidden-layer counts are part of the checkpoint. Day 3 does not train
-    them; they only fix the MLP depth so a saved config rebuilds the same
-    modules.
+    Hidden-layer counts are part of the checkpoint. They fix the MLP depth
+    so a saved config rebuilds the same modules.
     """
 
     obs_dim: int = Field(default=DEFAULT_OBS_DIM, ge=1)
