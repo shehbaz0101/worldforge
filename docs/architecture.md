@@ -4,8 +4,8 @@ WorldForge is a latent world model for a scientific dynamics sandbox. The
 target pipeline learns a compact state from trajectories, rolls it forward,
 plans with that model, and scores prediction and control offline. The
 environment, the trajectory record, an offline dataset builder, a latent
-model, and a one-step training loop are in the tree. The planner, eval
-harness, and HTTP API are later days.
+model, a one-step training loop, and an open-loop prediction eval are in
+the tree. The planner and the HTTP API are later days.
 
 ## Components
 
@@ -18,6 +18,8 @@ flowchart LR
   encoder --> dynamics[Dynamics]
   dynamics --> decoder[Decoder]
   decoder --> predict[One-step predict]
+  dynamics --> rolloutEval[Open-loop rollout]
+  rolloutEval --> metrics[Horizon MSE]
   dynamics --> planner[Planner]
   planner --> control[Control eval]
 ```
@@ -27,18 +29,18 @@ flowchart LR
 | Env | Shipped. Default `lotka_volterra`. | More environments can register behind the same reset/step protocol. |
 | Dataset | Shipped. Corpus JSONL, per-episode JSON, manifest, train/val/test split, replay batch. | The trainer samples that replay batch. Holding out val and test is up to the caller. |
 | Encoder | Shipped. Deterministic MLP, observation to latent `z`. | A stochastic encoder would belong to the reserved RSSM variant. |
-| Dynamics | Shipped. Day 3 baseline: deterministic residual MLP, `(z, a) -> z_next`. | `dynamics="rssm"` is reserved and raises `NotImplementedError`. Multi-step rollout loss is later. |
+| Dynamics | Shipped. Day 3 baseline: deterministic residual MLP, `(z, a) -> z_next`. | `dynamics="rssm"` is reserved and raises `NotImplementedError`. A multi-step training loss is later. |
 | Decoder | Shipped. Small MLP, latent to reconstructed observation. | Training scores it with a weighted reconstruction MSE. |
-| World model | Shipped. `encode`, `step`, `decode`, `predict`, and `forward`. Checkpoint directory with `config.json` and `weights.pt`. | Day 4 trains these weights. The checkpoint format is unchanged. |
-| Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | Multi-step rollout loss is later. No planner. |
-| Planner | Not started. | Model-based action search. |
-| Eval | Not started. | Open-loop prediction error and offline control return. |
+| World model | Shipped. `encode`, `step`, `decode`, `predict`, and `forward`. Checkpoint directory with `config.json` and `weights.pt`. | Day 4 trains these weights. Day 5 loads them for an open-loop rollout. The checkpoint format is unchanged. |
+| Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | A multi-step rollout loss is later. No planner. |
+| Planner | Not started. | Day 6 model-based action search. |
+| Eval | Shipped. Open-loop latent rollout and per-horizon MSE, `worldforge rollout` and `worldforge eval-predict`. | Offline control return is later. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
-pretrained weight file. Model and train tests need the optional `ml` extra
-(`torch` and `numpy`). CI installs a CPU build of torch before that extra.
-There is no FastAPI app and no paid API. There is no planner and no
-multi-step rollout loss in this revision.
+pretrained weight file. Model, train, and prediction tests need the optional
+`ml` extra (`torch` and `numpy`). CI installs a CPU build of torch before
+that extra. There is no FastAPI app and no paid API. There is no planner and
+no multi-step training loss in this revision.
 
 ## Default environment
 
@@ -223,9 +225,73 @@ does not take a split flag. Defaults are 3 epochs, batch size 8, learning
 rate `1e-3`, seed 0, device `cpu`. On the golden fixtures that is 6 batches
 per epoch and finishes in a few seconds.
 
+## Open-loop prediction
+
+`src/worldforge/eval/` rolls a trained or untrained `WorldModel` without
+updating it and without searching for actions. The environment is not
+stepped. Actions come from a stored trajectory.
+
+From the first observation `o_0` and actions `a_0 .. a_{H-1}`:
+
+```text
+z_0 = encode(o_0)
+z_h = step(z_{h-1}, a_{h-1})    for h = 1 .. H
+o_hat_h = decode(z_h)
+```
+
+The encoder runs once. Later predictions are not encoded again, so the
+rollout is open-loop. Horizon 1 is `predict(o_0, a_0)`. `rollout_latent`
+accepts a batch: observation `(..., obs_dim)`, actions
+`(..., horizon, action_dim)`.
+
+The target at horizon `h` is the stored next observation of transition
+`h - 1`. Episodes must be a single chain: each observation equals the
+previous next observation. `open_loop_metrics` scores every episode in the
+loaded corpus. An episode shorter than the requested horizon still
+contributes to the horizons it reaches. The request fails when no episode
+is that long. With no horizon, each episode is scored to its last step.
+
+At horizon `h` the report stores:
+
+| Field | Reduction |
+| --- | --- |
+| `mse_by_h` | Mean squared error over episodes that reach `h` and over observation features. |
+| `mae_by_h` | Mean absolute error, same reduction. |
+| `residual_std_by_h` | Population standard deviation of `(prediction - target)` over those same elements. A calibration stub, not a reliability diagram. |
+| `n_episodes_by_h` | How many episodes reached `h`. |
+
+`n_episodes` is the number of episodes in the call. `horizons` is `1 .. H`.
+
+`worldforge eval-predict` and `worldforge rollout` both write that report.
+`--checkpoint` loads a Day 3 directory (`config.json`, `weights.pt`) and
+ignores the architecture flags. Without it, `--seed` builds an untrained
+model. `--data` is a corpus directory, `corpus.jsonl`, or one trajectory
+file. `--out` is the JSON file. `--horizon` caps the score. The model is
+set to eval for the rollout and the previous train/eval flag is restored.
+`rollout_latent` itself stays differentiable so a later multi-step loss can
+call it.
+
+The file format is `worldforge.predict.v1`:
+
+| Field | Contents |
+| --- | --- |
+| `format` | `worldforge.predict.v1` |
+| `horizons` | `[1, 2, ..., H]` |
+| `mse_by_h` | One finite MSE per horizon. |
+| `mae_by_h` | One finite MAE per horizon. |
+| `residual_std_by_h` | One finite residual standard deviation per horizon. |
+| `n_episodes` | Episodes scored. |
+| `n_episodes_by_h` | Episodes per horizon. |
+| `checkpoint` | Checkpoint path, or `null` for a seeded untrained model. |
+| `data` | Data path, or `null` when the library call omits it. |
+
+On the golden fixtures the default score is 6 episodes and horizons 1..8.
+That run does not train and finishes in about a second on CPU.
+
 ## Where later days attach
 
-Day 5 can add a multi-step loss on rolled-out latents. The planner still
-proposes `Action` sequences. Prediction eval still compares a rolled-out
-trajectory with a held-out split. Control eval still compares return against
-the zero dose already used by `env-demo`. There is still no HTTP API.
+Day 6 can search action sequences with this model. Control eval can compare
+the planner's return with the zero dose already used by `env-demo`. A
+multi-step training loss can backprop through `rollout_latent`. The CLI
+still fits every episode in `--data` when training; holding out val and
+test stays with `split_trajectories`. There is still no HTTP API.
