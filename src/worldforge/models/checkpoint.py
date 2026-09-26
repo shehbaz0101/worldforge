@@ -8,7 +8,8 @@ A checkpoint is a directory:
 
 ``load_checkpoint`` rebuilds the modules from the config and loads the
 weights onto CPU. The init seed is not stored; the loaded tensors replace
-the fresh initialization.
+the fresh initialization. Other files in the directory, including a Day 4
+``metrics.jsonl`` or ``train.json``, are ignored.
 """
 
 from __future__ import annotations
