@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision hardens the Day 7 HTTP API (path sandbox, rate limit, offline guard) on top of the Day 6 planner, the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. `worldforge serve` exposes that same loop over HTTP and binds to localhost. Corpus, checkpoint, and output paths stay inside a data root. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision adds `worldforge demo`: one offline command that trains a tiny checkpoint on the checked-in sample corpus, then prints open-loop prediction and planning regret. It sits on the Day 8 path sandbox, rate limit, and offline guard, the Day 7 HTTP API, the Day 6 planner, the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. `worldforge serve` exposes that same loop over HTTP and binds to localhost. Corpus, checkpoint, and output paths stay inside a data root. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -19,6 +19,25 @@ The environment, schema, and corpus commands do not need PyTorch. FastAPI and uv
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev,ml]"
+```
+
+## Demo
+
+One offline command trains a tiny checkpoint on `samples/trajectories` and prints prediction and planning metrics. It needs the `ml` extra. Install a CPU build of torch first so pip does not pull a CUDA wheel:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[ml]"
+worldforge demo
+```
+
+The same call is `python -m worldforge demo`. The default output directory is `demo-run/` (`checkpoint/`, `predict.json`, `plan.json`, `eval-plan.json`, and `summary.txt`). The fit is capped at 5 epochs and 8 replay steps. The checked-in corpus is two episodes of horizon 4. Caps and that episode list live in `samples/demo.json`. When `samples/trajectories` is already inside the data root, the demo reads it in place. Otherwise it copies those files under the output directory, or collects the same two episodes if the samples are missing. `--data` selects another corpus. Paths stay inside `--data-root` (or `WORLDFORGE_DATA_ROOT`, or the current directory). A longer fit stays on `worldforge train`.
+
+`worldforge serve` is the local HTTP API. The default bind is `127.0.0.1:8000`. `GET /health` does not need torch. The predict, plan, and train routes do, and they answer HTTP 503 when the `ml` extra is missing. Day 8 knobs, in short: `--data-root` is the path sandbox, and `--rate-limit` / `--rate-window` cap the expensive POST routes (HTTP 429, `Retry-After`). The server refuses non-loopback connections. Details are in [HTTP API](#http-api).
+
+```bash
+worldforge serve
+worldforge serve --host 127.0.0.1 --port 8000 --data-root . --rate-limit 60 --rate-window 60
 ```
 
 ## Quickstart
@@ -245,8 +264,9 @@ with TestClient(app) as client:
 5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`.
 6. **Day 6 — Planner.** CEM on latent rollouts, closed-loop regret against the zero dose and a random dose, `worldforge plan` / `worldforge eval-plan`.
 7. **Day 7 — HTTP API.** FastAPI service: health, open-loop metrics, one CEM plan, closed-loop regret, and a short train. `worldforge serve`.
-8. **Day 8 — Hardening.** Path sandbox, in-process rate limits, offline socket guard. This revision.
-9. **Later.** A multi-step rollout loss, and a longer saved training run.
+8. **Day 8 — Hardening.** Path sandbox, in-process rate limits, offline socket guard.
+9. **Day 9 — Demo.** `worldforge demo` on `samples/`: tiny train, open-loop predict, one plan, and closed-loop regret. This revision.
+10. **Later.** A multi-step rollout loss, and a longer saved training run.
 
 ## Docs
 
@@ -259,6 +279,7 @@ with TestClient(app) as client:
 - [Day 6 log](docs/daily/2026-09-26-day6.md)
 - [Day 7 log](docs/daily/2026-09-26-day7.md)
 - [Day 8 log](docs/daily/2026-09-26-day8.md)
+- [Day 9 log](docs/daily/2026-09-26-day9.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -269,7 +290,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, `tests/test_plan.py`, and `tests/test_api.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. The API tests use FastAPI's `TestClient` (health, plan, predict, a one-step regret report, a one-step train, path escapes, and HTTP 429). They do not bind a port and they are not marked `integration`. Pytest keeps its temporary directory under `.pytest-tmp` in the current directory so those paths stay inside the default data root. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, `tests/test_plan.py`, `tests/test_api.py`, and the `worldforge demo` loop in `tests/test_demo.py` import torch, so the full suite needs the `ml` extra. The corpus checks in `tests/test_demo.py` do not. If torch is missing, those loop tests skip and `worldforge demo` exits with the same `ml` extra message as `worldforge train`. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. The API tests use FastAPI's `TestClient` (health, plan, predict, a one-step regret report, a one-step train, path escapes, and HTTP 429). They do not bind a port and they are not marked `integration`. Pytest keeps its temporary directory under `.pytest-tmp` in the current directory so those paths stay inside the default data root. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"

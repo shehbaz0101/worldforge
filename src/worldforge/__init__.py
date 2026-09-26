@@ -8,7 +8,9 @@ Those four need the optional ``ml`` extra (``torch``). The Day 7 HTTP
 API is :mod:`worldforge.api`. Importing it loads FastAPI, installs the
 offline socket guard, and does not load PyTorch; the predict, plan, and
 train routes do, when called. Day 8 keeps user paths inside a data root
-and rate-limits the expensive POST routes.
+and rate-limits the expensive POST routes. Day 9 adds ``worldforge demo``,
+which trains on the checked-in sample corpus and prints prediction and
+planning metrics. That command needs the ``ml`` extra.
 """
 
 from worldforge.data import (

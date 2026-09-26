@@ -5,7 +5,7 @@ dynamics sandbox. The aim is compact state dynamics learned from trajectories,
 multi-step rollouts, model-based planning, and offline prediction and control
 evals.
 
-**Status:** Day 8.
+**Status:** Day 9.
 
 Day 1 added the package, the default Lotka-Volterra environment, the
 trajectory schema, and pytest CI on Python 3.11 and 3.12. Day 2 collects
@@ -59,3 +59,17 @@ socket guard that refuses non-loopback connects, so the server does not
 download weights. There is still no authentication. See
 [docs/architecture.md](docs/architecture.md) and
 [docs/daily/2026-09-26-day8.md](docs/daily/2026-09-26-day8.md).
+
+Day 9 is the newcomer path. `worldforge demo` reads `samples/demo.json`
+and the two-episode corpus in `samples/trajectories/` (horizon 4, policies
+`zero` and `random`). It trains a small CPU checkpoint (latent width 4,
+one epoch, one replay step), scores an open-loop rollout, plans one short
+action sequence, and writes closed-loop regret against the zero dose and
+the random dose. The command prints those metrics and writes them under
+`demo-run/` unless `--out` is set. The fit is capped the same way as
+`POST /train` (at most 5 epochs and 8 steps per epoch). Paths stay inside
+the Day 8 data root. If the sample corpus is outside that root it is
+copied into the output directory; if the files are missing the same
+episodes are collected there. Torch stays the `ml` extra. Without it the
+command exits with the same install hint as `worldforge train`. See
+[docs/daily/2026-09-26-day9.md](docs/daily/2026-09-26-day9.md).
