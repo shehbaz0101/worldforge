@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision collects those trajectories. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. No model is trained here, and nothing in this revision calls the network.
+This revision adds the Day 3 latent model on top of the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -12,6 +12,13 @@ Python 3.11 or newer.
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+The environment, schema, and corpus commands do not need PyTorch. The Day 3 model needs the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[dev,ml]"
 ```
 
 ## Quickstart
@@ -48,14 +55,31 @@ parts = split_trajectories(episodes, seed=0, ratios=(0.5, 0.25, 0.25))
 
 `split_trajectories` is deterministic for a seed. The default ratios are 0.8, 0.1, 0.1. `sample_transition_batch` draws a deterministic replay batch from stored transitions.
 
+`model-info` prints the Day 3 architecture. The baseline dynamics are a deterministic residual MLP: `z` and an action map to the next `z`. `forward-smoke` runs that map once. `--fixture` selects one stored transition. Without it, the input is the coexistence state `(1, 1)` and a zero dose. `rssm` is accepted as a name and is not implemented.
+
+```bash
+worldforge model-info
+worldforge forward-smoke --fixture tests/fixtures/trajectories --seed 0
+```
+
+```python
+from worldforge.models import ModelConfig, WorldModel, load_checkpoint, save_checkpoint
+
+model = WorldModel(ModelConfig(latent_dim=8), seed=0)
+save_checkpoint("checkpoints/day3", model)
+restored = load_checkpoint("checkpoints/day3")
+```
+
+The checkpoint directory is `config.json` plus `weights.pt`. It stores the config and the `state_dict`. It does not store an optimizer. Importing `worldforge` does not import torch; importing `WorldModel` does.
+
 ## Roadmap
 
 1. **Day 1 — Scaffold.** Kinetic environment, trajectory schema, CLI, pytest CI.
 2. **Day 2 — Dataset.** Collect JSONL trajectories, split them, and sample a replay batch.
-3. **Day 3 — Encoder.** Map an observation to a compact latent code.
-4. **Day 4 — Dynamics.** One-step latent transition.
+3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint. No training loop.
+4. **Day 4 — Training loop.** One-step loss and an optimizer around the Day 3 model.
 5. **Day 5 — Multi-step loss.** Train on rolled-out latent trajectories.
-6. **Day 6 — Trainer.** Offline training loop and a local checkpoint.
+6. **Day 6 — Saved run.** A trained checkpoint on the offline split, using the Day 3 format.
 7. **Day 7 — Prediction eval.** Open-loop rollout error on held-out seeds.
 8. **Day 8 — Planner.** Model-based action search.
 9. **Day 9 — Control eval.** Offline return of the planner against the zero dose.
@@ -66,15 +90,18 @@ parts = split_trajectories(episodes, seed=0, ratios=(0.5, 0.25, 0.25))
 - [Architecture](docs/architecture.md) — components, and what this revision ships.
 - [Day 1 log](docs/daily/2026-09-26.md)
 - [Day 2 log](docs/daily/2026-09-26-day2.md)
+- [Day 3 log](docs/daily/2026-09-26-day3.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
 
 ```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[dev,ml]"
 pytest
 ```
 
-CI runs that suite on Python 3.11 and 3.12. No test uses the network. Optional lint:
+`tests/test_models.py` imports torch, so the full suite needs the `ml` extra. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"

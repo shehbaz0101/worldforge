@@ -27,6 +27,15 @@ dependencies = [
 dev = [
     "pytest>=8.3",
 ]
+# Day 3 latent model. Not required for the environment, schema, or corpus
+# commands. CI installs a CPU wheel before this extra so the test job does
+# not pull a CUDA build. Model tests import torch and need this extra.
+ml = [
+    "torch>=2.2,<3",
+    # Torch warns on import when NumPy is missing. The model code does not
+    # call NumPy; this keeps ``model-info`` stderr empty.
+    "numpy>=1.26",
+]
 # Optional. CI runs `ruff check` with the selection below. Not required to
 # import or run WorldForge.
 lint = ["ruff>=0.16"]
