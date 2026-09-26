@@ -30,3 +30,6 @@ htmlcov/
 
 # Local training outputs (Day 4 checkpoints and metrics)
 checkpoints/
+
+# Default `worldforge demo` output
+demo-run/

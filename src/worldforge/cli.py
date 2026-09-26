@@ -11,15 +11,18 @@ prints a trajectory summary plus the final ASCII state.
 ``rollout`` and ``eval-predict`` score an open-loop latent rollout and write
 a prediction report. ``plan`` searches one action sequence with CEM.
 ``eval-plan`` rolls that planner on the environment and writes planning
-regret against a zero dose and a random dose. ``serve`` runs the HTTP API
-on localhost (``GET /health``, ``POST /rollout``, ``POST /eval/predict``,
-``POST /plan``, ``POST /eval/plan``, ``POST /train``). Dataset commands do
-not import PyTorch. The model, train, prediction, and planning commands,
-and those HTTP routes, need the optional ``ml`` extra. ``serve`` and
-``GET /health`` do not. Corpus, checkpoint, and output paths must stay
-inside ``--data-root`` (or ``WORLDFORGE_DATA_ROOT``, or the current
-directory). ``serve`` installs an offline socket guard. None of these
-commands use the network.
+regret against a zero dose and a random dose. ``demo`` runs that loop
+offline on the checked-in sample corpus: a tiny train, an open-loop
+predict, one plan, and a closed-loop regret report. ``serve`` runs the
+HTTP API on localhost (``GET /health``, ``POST /rollout``,
+``POST /eval/predict``, ``POST /plan``, ``POST /eval/plan``,
+``POST /train``). Dataset commands do not import PyTorch. The model,
+train, prediction, planning, and demo commands, and those HTTP routes,
+need the optional ``ml`` extra. ``serve`` and ``GET /health`` do not.
+Corpus, checkpoint, and output paths must stay inside ``--data-root``
+(or ``WORLDFORGE_DATA_ROOT``, or the current directory). ``serve`` and
+``demo`` install an offline socket guard. None of these commands use
+the network.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from pydantic import ValidationError
 from worldforge import __version__
 from worldforge.data import collect_corpus, format_dataset_info, inspect_dataset, load_corpus
 from worldforge.data.dataset import DEFAULT_HORIZON, DEFAULT_N_EPISODES, FormatName
+from worldforge.demo import MAX_DEMO_EPOCHS
 from worldforge.envs import DEFAULT_ENV_ID, make_env
 from worldforge.envs.lotka_volterra import ACTION_LIMIT
 from worldforge.models.config import (
@@ -282,6 +286,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_plan_args(eval_plan, closed_loop=True)
 
+    demo = subparsers.add_parser(
+        "demo",
+        help="Train a tiny checkpoint on the sample corpus and print predict and plan metrics",
+    )
+    demo.add_argument(
+        "--out",
+        type=Path,
+        default=Path("demo-run"),
+        help="output directory for the checkpoint and reports (default: demo-run)",
+    )
+    demo.add_argument(
+        "--data",
+        type=Path,
+        default=None,
+        help="corpus directory or trajectory file; default is samples/trajectories",
+    )
+    demo.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="weight, replay, CEM, and environment seed (default: samples/demo.json)",
+    )
+    demo.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help=(
+            f"optimizer passes, 1-{MAX_DEMO_EPOCHS} "
+            "(default: samples/demo.json, usually 1)"
+        ),
+    )
+    demo.add_argument(
+        "--device",
+        default="cpu",
+        help="torch device; this command accepts cpu only (default: cpu)",
+    )
+    _add_data_root(demo)
+
     serve = subparsers.add_parser(
         "serve",
         help="Run the HTTP API (health, rollout, plan, train)",
@@ -480,6 +522,7 @@ _SANDBOXED_FIELDS: dict[str, tuple[str, ...]] = {
     "eval-predict": ("data", "out", "checkpoint"),
     "plan": ("out", "checkpoint", "data"),
     "eval-plan": ("out", "checkpoint"),
+    "demo": ("out", "data"),
 }
 
 _FIELD_LABELS = {
@@ -545,6 +588,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _eval_plan(parser, args)
     if args.command == "serve":
         return _serve(parser, args)
+    if args.command == "demo":
+        return _demo(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -569,6 +614,47 @@ def _restore_env(name: str, previous: str | None) -> None:
         os.environ.pop(name, None)
     else:
         os.environ[name] = previous
+
+
+def _demo(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Train, predict, and plan offline. Does not open an outbound connection."""
+
+    if args.device != "cpu":
+        parser.error("--device must be cpu")
+    if args.seed is not None and args.seed < 0:
+        parser.error("--seed must be >= 0")
+    try:
+        demo_api = importlib.import_module("worldforge.demo")
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == "torch" or str(missing).startswith("torch."):
+            parser.error(
+                'worldforge demo needs the optional ml extra: pip install -e ".[ml]" '
+                "(a CPU build of torch is enough). "
+                f"Import failed: {exc}"
+            )
+        raise
+    if args.epochs is not None and (
+        args.epochs < 1 or args.epochs > demo_api.MAX_DEMO_EPOCHS
+    ):
+        parser.error(f"--epochs must be between 1 and {demo_api.MAX_DEMO_EPOCHS}")
+    try:
+        result = demo_api.run_demo(
+            args.out,
+            data=args.data,
+            seed=args.seed,
+            epochs=args.epochs,
+        )
+    except demo_api.DemoDependencyError as exc:
+        parser.error(str(exc))
+        return 2
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(demo_api.format_demo_summary(result))
+    if not demo_api.metrics_are_finite(result):
+        return 1
+    return 0
 
 
 def _serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:

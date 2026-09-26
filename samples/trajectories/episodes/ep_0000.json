@@ -1,0 +1,107 @@
+{
+  "env_id": "lotka_volterra",
+  "seed": 0,
+  "horizon": 4,
+  "transitions": [
+    {
+      "observation": {
+        "values": [
+          1.5977484069825625,
+          1.4853407238223932
+        ],
+        "t": 0.0
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -1.0721600792605606,
+      "next_observation": {
+        "values": [
+          1.4259131963807574,
+          1.6462468828798031
+        ],
+        "t": 0.2
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          1.4259131963807574,
+          1.6462468828798031
+        ],
+        "t": 0.2
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.9970847828493175,
+      "next_observation": {
+        "values": [
+          1.2377676508609894,
+          1.759317131988328
+        ],
+        "t": 0.4
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          1.2377676508609894,
+          1.759317131988328
+        ],
+        "t": 0.4
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.8681306185128981,
+      "next_observation": {
+        "values": [
+          1.056733631928357,
+          1.8113969865845412
+        ],
+        "t": 0.6000000000000001
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          1.056733631928357,
+          1.8113969865845412
+        ],
+        "t": 0.6000000000000001
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.9040770473722094,
+      "next_observation": {
+        "values": [
+          0.8983835178357688,
+          1.8024605652079781
+        ],
+        "t": 0.8
+      },
+      "terminated": false,
+      "truncated": true
+    }
+  ]
+}

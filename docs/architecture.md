@@ -39,6 +39,7 @@ flowchart LR
 | Planner | Shipped. CEM over a short clipped action sequence, scored by latent rollouts. `worldforge plan`. | A learned reward, or a longer horizon, is later. |
 | Eval | Shipped. Open-loop latent rollout and per-horizon MSE (`worldforge rollout`, `worldforge eval-predict`). Closed-loop planning regret (`worldforge eval-plan`). | Holding out val and test inside the eval commands is still up to the caller. |
 | API | Shipped. FastAPI. `worldforge serve`. `GET /health`, `POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`, `POST /train`. Paths stay inside a data root. Expensive POSTs are rate limited. An offline socket guard refuses non-loopback connects. | Authentication is later. |
+| Demo | Shipped. `worldforge demo` trains on `samples/trajectories`, then writes open-loop MSE, one CEM plan, and closed-loop regret. | A longer saved training run is later. The demo caps stay short. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
 pretrained weight file. Model, train, prediction, planning, and API tests need
@@ -439,9 +440,32 @@ The unit tests use FastAPI's `TestClient`. They do not bind a socket and
 they are not marked `integration`. The dev extra installs `httpx2`, which
 Starlette prefers when it is installed.
 
+## Demo
+
+`worldforge demo` is the Day 9 offline path. It calls `train_world_model`,
+`open_loop_metrics`, `plan_actions`, and `planning_regret`. It does not
+add a second trainer or a second planner. The default corpus is
+`samples/trajectories/` (two episodes, horizon 4). `samples/demo.json`
+holds the caps: one epoch, one replay step, latent width 4, hidden width
+16, predict horizon 4, plan horizon 2, four CEM samples, one iteration,
+and two closed-loop steps. `epochs` cannot exceed 5 and `steps_per_epoch`
+cannot exceed 8, the same ceilings as `POST /train`.
+
+`--out` (default `demo-run`) and `--data` resolve inside the data root.
+When the sample directory is already inside that root, the demo reads it.
+When it is outside, the files are copied to `<out>/corpus`. When the
+samples are not on disk, the demo collects the episode list from
+`demo.json` into that same directory. After torch imports, the command
+installs the offline socket guard. A missing `ml` extra is an argparse
+error that names `pip install -e ".[ml]"`, the same hint as `worldforge
+train`. The printed summary is also `summary.txt` in the output directory.
+The JSON reports stay `worldforge.predict.v1`, `worldforge.action_sequence.v1`,
+and `worldforge.plan.v1`.
+
 ## Where later days attach
 
 A later day can add authentication. A multi-step training loss can
 backprop through `rollout_latent`. The CLI still fits every episode in
 `--data` when training; holding out val and test stays with
-`split_trajectories`. The HTTP API is `worldforge serve`.
+`split_trajectories`. The HTTP API is `worldforge serve`. The newcomer
+loop is `worldforge demo`.

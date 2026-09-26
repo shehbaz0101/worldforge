@@ -1,0 +1,24 @@
+{
+  "format": "worldforge.demo.v1",
+  "corpus": "trajectories",
+  "horizon": 4,
+  "episodes": [
+    {"seed": 0, "policy": "zero"},
+    {"seed": 1, "policy": "random"}
+  ],
+  "epochs": 1,
+  "batch_size": 4,
+  "steps_per_epoch": 1,
+  "lr": 0.001,
+  "seed": 0,
+  "device": "cpu",
+  "latent_dim": 4,
+  "hidden_dim": 16,
+  "predict_horizon": 4,
+  "plan_horizon": 2,
+  "n_samples": 4,
+  "n_iterations": 1,
+  "elite_fraction": 0.5,
+  "n_steps": 2,
+  "env_seed": 0
+}
