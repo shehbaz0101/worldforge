@@ -375,7 +375,8 @@ def test_root_import_does_not_import_torch() -> None:
         "import sys, worldforge, worldforge.models.config, worldforge.cli; "
         "assert 'torch' not in sys.modules; "
         "assert 'worldforge.models.world' not in sys.modules; "
-        "assert 'worldforge.train' not in sys.modules"
+        "assert 'worldforge.train' not in sys.modules; "
+        "assert 'worldforge.eval' not in sys.modules"
     )
     completed = subprocess.run(
         [sys.executable, "-c", code],

@@ -1,8 +1,9 @@
 """WorldForge: latent world models for a scientific dynamics sandbox.
 
 The environment, trajectory schema, and offline corpus import without
-PyTorch. The Day 3 latent model is :mod:`worldforge.models` and the Day 4
-trainer is :mod:`worldforge.train`. Both need the optional ``ml`` extra
+PyTorch. The Day 3 latent model is :mod:`worldforge.models`, the Day 4
+trainer is :mod:`worldforge.train`, and the Day 5 open-loop eval is
+:mod:`worldforge.eval`. Those three need the optional ``ml`` extra
 (``torch``).
 """
 
