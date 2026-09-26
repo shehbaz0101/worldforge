@@ -38,14 +38,17 @@ flowchart LR
 | Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | A multi-step rollout loss is later. |
 | Planner | Shipped. CEM over a short clipped action sequence, scored by latent rollouts. `worldforge plan`. | A learned reward, or a longer horizon, is later. |
 | Eval | Shipped. Open-loop latent rollout and per-horizon MSE (`worldforge rollout`, `worldforge eval-predict`). Closed-loop planning regret (`worldforge eval-plan`). | Holding out val and test inside the eval commands is still up to the caller. |
-| API | Shipped. FastAPI. `worldforge serve`. `GET /health`, `POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`, `POST /train`. | Authentication, rate limits, and a path sandbox are later. |
+| API | Shipped. FastAPI. `worldforge serve`. `GET /health`, `POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`, `POST /train`. Paths stay inside a data root. Expensive POSTs are rate limited. An offline socket guard refuses non-loopback connects. | Authentication is later. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
 pretrained weight file. Model, train, prediction, planning, and API tests need
 the optional `ml` extra (`torch` and `numpy`). CI installs a CPU build of torch
-before that extra. The HTTP API is local. It does not call out and it does not
-download weights. There is no authentication yet. There is no multi-step
-training loss in this revision.
+before that extra. The HTTP API is local and offline-by-design. Importing
+it installs a socket guard that refuses non-loopback TCP connects. It does
+not download weights. User paths stay inside the data root. The expensive
+POST routes share a per-client rate limit (HTTP 429, `Retry-After`).
+`GET /health` is not limited. There is no authentication yet. There is no
+multi-step training loss in this revision.
 
 ## Default environment
 
@@ -382,16 +385,34 @@ finishes in about a second.
 
 ## HTTP API
 
-`src/worldforge/api/` is the Day 7 service. `worldforge serve` loads
-`worldforge.api:app` with uvicorn. The default bind is `127.0.0.1:8000`.
-`--host` and `--port` change it. `--reload` restarts when source files
-change. The process does not open an outbound connection.
+`src/worldforge/api/` is the Day 7 service, hardened on Day 8.
+`worldforge serve` loads `worldforge.api:app` with uvicorn. The default
+bind is `127.0.0.1:8000`. `--host` and `--port` change it. `--reload`
+restarts when source files change. Importing the API installs the offline
+socket guard (`worldforge.offline`). Non-loopback TCP connects raise.
+Loopback is allowed. The process does not download weights.
 
 Importing `worldforge.api` loads FastAPI and does not load PyTorch.
-`GET /health` returns `status: ok` and the package version. The other
-routes import the `ml` extra when called. A missing torch install is
-HTTP 503. A bad body, a missing path, or a reserved `rssm` dynamics name
-is HTTP 422. There is no API key and no rate limit.
+`GET /health` returns `status: ok` and the package version and is not
+rate limited. The other routes import the `ml` extra when called. A
+missing torch install is HTTP 503. A bad body, a missing path, a path
+outside the data root, or a reserved `rssm` dynamics name is HTTP 422.
+
+The data root is `--data-root`, or `WORLDFORGE_DATA_ROOT`, or the current
+directory. Relative paths resolve against that root. Absolute paths must
+resolve inside it. `..` and symlinks are resolved first, so a traversal
+or a link that leaves the root is rejected. CLI corpus, checkpoint, and
+output paths use the same rule. `POST /train` with `out` omitted creates
+the checkpoint directory inside the data root.
+
+`POST /rollout`, `POST /eval/predict`, `POST /plan`, `POST /eval/plan`,
+and `POST /train` share one sliding window per client address
+(`worldforge.ratelimit`). The default is 60 requests per 60 seconds
+(`WORLDFORGE_RATE_LIMIT`, `WORLDFORGE_RATE_WINDOW_SECONDS`, or
+`worldforge serve --rate-limit` and `--rate-window`). Over the limit the
+response is HTTP 429 with `Retry-After` set to the seconds left in the
+window. `TestClient` shares one bucket because it has a single client
+address. There is no API key.
 
 | Route | Body | Response |
 | --- | --- | --- |
@@ -410,8 +431,8 @@ that same `seed` also draws the CEM samples, matching the CLI.
 
 The HTTP trainer is capped so a TestClient call stays short: `epochs` at
 most 5 (default 1), `steps_per_epoch` at most 8 (default 1), `batch_size`
-default 1, `device` `cpu` only. `out` omitted creates a temporary
-directory and returns that path. The CLI `worldforge train` is not capped
+default 1, `device` `cpu` only. `out` omitted creates a directory inside
+the data root and returns that path. The CLI `worldforge train` is not capped
 and still runs the coverage pass. Request models reject unknown fields.
 
 The unit tests use FastAPI's `TestClient`. They do not bind a socket and
@@ -420,8 +441,7 @@ Starlette prefers when it is installed.
 
 ## Where later days attach
 
-A later day can add authentication, rate limits, and a sandbox around
-checkpoint paths. A multi-step training loss can backprop through
-`rollout_latent`. The CLI still fits every episode in `--data` when
-training; holding out val and test stays with `split_trajectories`. The
-HTTP API is `worldforge serve`.
+A later day can add authentication. A multi-step training loss can
+backprop through `rollout_latent`. The CLI still fits every episode in
+`--data` when training; holding out val and test stays with
+`split_trajectories`. The HTTP API is `worldforge serve`.

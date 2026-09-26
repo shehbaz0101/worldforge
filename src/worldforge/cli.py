@@ -16,7 +16,10 @@ on localhost (``GET /health``, ``POST /rollout``, ``POST /eval/predict``,
 ``POST /plan``, ``POST /eval/plan``, ``POST /train``). Dataset commands do
 not import PyTorch. The model, train, prediction, and planning commands,
 and those HTTP routes, need the optional ``ml`` extra. ``serve`` and
-``GET /health`` do not. None of these commands use the network.
+``GET /health`` do not. Corpus, checkpoint, and output paths must stay
+inside ``--data-root`` (or ``WORLDFORGE_DATA_ROOT``, or the current
+directory). ``serve`` installs an offline socket guard. None of these
+commands use the network.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -43,7 +47,20 @@ from worldforge.models.config import (
     KNOWN_DYNAMICS,
     ModelConfig,
 )
+from worldforge.offline import install_offline_guard
+from worldforge.ratelimit import (
+    DEFAULT_RATE_LIMIT,
+    DEFAULT_RATE_WINDOW_SECONDS,
+    RATE_LIMIT_ENV,
+    RATE_WINDOW_ENV,
+)
 from worldforge.rollout import POLICIES, format_summary, rollout
+from worldforge.sandbox import (
+    DATA_ROOT_ENV,
+    PathSandboxError,
+    configure_data_root,
+    resolve_user_path,
+)
 
 DEFAULT_DEMO_STEPS = 12
 MAX_DEMO_STEPS = 256
@@ -127,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="corpus JSONL, one JSON file per episode, or both (default: both)",
     )
+    _add_data_root(collect)
 
     info = subparsers.add_parser(
         "dataset-info",
@@ -137,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="corpus directory, corpus JSONL, episode JSONL, or episode JSON",
     )
+    _add_data_root(info)
 
     model_info = subparsers.add_parser(
         "model-info",
@@ -173,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="transition index inside that episode (default: 0)",
     )
+    _add_data_root(smoke)
 
     train = subparsers.add_parser(
         "train",
@@ -238,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="adam or sgd (default: adam)",
     )
     _add_model_config_args(train)
+    _add_data_root(train)
 
     rollout_cmd = subparsers.add_parser(
         "rollout",
@@ -281,6 +302,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="reload when source files change",
     )
+    serve.add_argument(
+        "--rate-limit",
+        type=int,
+        default=None,
+        help=(
+            "max combined POST /rollout, /eval/predict, /plan, /eval/plan, and "
+            f"/train requests per client per window (default: {DEFAULT_RATE_LIMIT}, "
+            f"or ${RATE_LIMIT_ENV}). GET /health is not limited"
+        ),
+    )
+    serve.add_argument(
+        "--rate-window",
+        type=float,
+        default=None,
+        help=(
+            "rate-limit window in seconds "
+            f"(default: {DEFAULT_RATE_WINDOW_SECONDS:g}, or ${RATE_WINDOW_ENV})"
+        ),
+    )
+    _add_data_root(serve)
     return parser
 
 
@@ -316,6 +357,7 @@ def _add_predict_args(parser: argparse.ArgumentParser) -> None:
         help="maximum horizon; default scores each episode to its last step",
     )
     _add_model_config_args(parser)
+    _add_data_root(parser)
 
 
 def _add_plan_args(parser: argparse.ArgumentParser, *, closed_loop: bool) -> None:
@@ -393,6 +435,7 @@ def _add_plan_args(parser: argparse.ArgumentParser, *, closed_loop: bool) -> Non
             help="episode index inside --data (default: 0)",
         )
     _add_model_config_args(parser)
+    _add_data_root(parser)
 
 
 def _add_model_config_args(parser: argparse.ArgumentParser) -> None:
@@ -428,9 +471,57 @@ def _add_model_config_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+_SANDBOXED_FIELDS: dict[str, tuple[str, ...]] = {
+    "collect": ("out",),
+    "dataset-info": ("path",),
+    "forward-smoke": ("fixture",),
+    "train": ("data", "out"),
+    "rollout": ("data", "out", "checkpoint"),
+    "eval-predict": ("data", "out", "checkpoint"),
+    "plan": ("out", "checkpoint", "data"),
+    "eval-plan": ("out", "checkpoint"),
+}
+
+_FIELD_LABELS = {
+    "out": "--out",
+    "data": "--data",
+    "checkpoint": "--checkpoint",
+    "fixture": "--fixture",
+    "path": "path",
+}
+
+
+def _add_data_root(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        help=(
+            "allowed root for corpus, checkpoint, and output paths "
+            f"(default: ${DATA_ROOT_ENV} or the current directory)"
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    previous_root = os.environ.get(DATA_ROOT_ENV)
+    root_flag = getattr(args, "data_root", None)
+    if root_flag is not None:
+        try:
+            os.environ[DATA_ROOT_ENV] = str(configure_data_root(root_flag))
+        except PathSandboxError as exc:
+            parser.error(str(exc))
+    try:
+        _sandbox_namespace(parser, args)
+        return _dispatch(parser, args)
+    finally:
+        if root_flag is not None:
+            _restore_env(DATA_ROOT_ENV, previous_root)
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "version":
         print(f"worldforge {__version__}")
         return 0
@@ -458,6 +549,28 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _sandbox_namespace(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Rewrite user paths so later reads and writes stay inside the data root."""
+
+    for name in _SANDBOXED_FIELDS.get(args.command, ()):
+        value = getattr(args, name, None)
+        if value is None:
+            continue
+        label = _FIELD_LABELS.get(name, name)
+        try:
+            resolved = resolve_user_path(value, label=label)
+        except PathSandboxError as exc:
+            parser.error(str(exc))
+        setattr(args, name, resolved)
+
+
+def _restore_env(name: str, previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
+
+
 def _serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Bind the HTTP API. Does not open an outbound connection."""
 
@@ -466,20 +579,39 @@ def _serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error("--host must not be empty")
     if args.port < 1 or args.port > 65535:
         parser.error("--port must be between 1 and 65535")
+    if args.rate_limit is not None and args.rate_limit < 1:
+        parser.error("--rate-limit must be >= 1")
+    if args.rate_window is not None and (
+        not math.isfinite(args.rate_window) or args.rate_window <= 0
+    ):
+        parser.error("--rate-window must be a positive number of seconds")
+    install_offline_guard()
+    previous_limit = os.environ.get(RATE_LIMIT_ENV)
+    previous_window = os.environ.get(RATE_WINDOW_ENV)
+    if args.rate_limit is not None:
+        os.environ[RATE_LIMIT_ENV] = str(args.rate_limit)
+    if args.rate_window is not None:
+        os.environ[RATE_WINDOW_ENV] = str(args.rate_window)
     try:
-        import uvicorn
-    except ImportError:
-        print(
-            "error: uvicorn is not installed. Reinstall WorldForge to run the API.",
-            file=sys.stderr,
+        try:
+            import uvicorn
+        except ImportError:
+            print(
+                "error: uvicorn is not installed. Reinstall WorldForge to run the API.",
+                file=sys.stderr,
+            )
+            return 1
+        uvicorn.run(
+            "worldforge.api:app",
+            host=host,
+            port=args.port,
+            reload=bool(args.reload),
         )
-        return 1
-    uvicorn.run(
-        "worldforge.api:app",
-        host=host,
-        port=args.port,
-        reload=bool(args.reload),
-    )
+    finally:
+        if args.rate_limit is not None:
+            _restore_env(RATE_LIMIT_ENV, previous_limit)
+        if args.rate_window is not None:
+            _restore_env(RATE_WINDOW_ENV, previous_window)
     return 0
 
 
