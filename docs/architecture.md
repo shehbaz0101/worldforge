@@ -3,9 +3,9 @@
 WorldForge is a latent world model for a scientific dynamics sandbox. The
 target pipeline learns a compact state from trajectories, rolls it forward,
 plans with that model, and scores prediction and control offline. The
-environment, the trajectory record, an offline dataset builder, and a Day 3
-latent model are in the tree. The training loop, planner, eval harness, and
-HTTP API are later days.
+environment, the trajectory record, an offline dataset builder, a latent
+model, and a one-step training loop are in the tree. The planner, eval
+harness, and HTTP API are later days.
 
 ## Components
 
@@ -13,7 +13,8 @@ HTTP API are later days.
 flowchart LR
   env[Env] --> traj[Trajectory]
   traj --> dataset[Dataset]
-  dataset --> encoder[Encoder]
+  dataset --> train[Train]
+  train --> encoder[Encoder]
   encoder --> dynamics[Dynamics]
   dynamics --> decoder[Decoder]
   decoder --> predict[One-step predict]
@@ -24,18 +25,20 @@ flowchart LR
 | Component | Shipped | Later |
 | --- | --- | --- |
 | Env | Shipped. Default `lotka_volterra`. | More environments can register behind the same reset/step protocol. |
-| Dataset | Shipped. Corpus JSONL, per-episode JSON, manifest, train/val/test split, replay batch. | The training loop still consumes the batch later. |
+| Dataset | Shipped. Corpus JSONL, per-episode JSON, manifest, train/val/test split, replay batch. | The trainer samples that replay batch. Holding out val and test is up to the caller. |
 | Encoder | Shipped. Deterministic MLP, observation to latent `z`. | A stochastic encoder would belong to the reserved RSSM variant. |
 | Dynamics | Shipped. Day 3 baseline: deterministic residual MLP, `(z, a) -> z_next`. | `dynamics="rssm"` is reserved and raises `NotImplementedError`. Multi-step rollout loss is later. |
-| Decoder | Shipped. Small MLP, latent to reconstructed observation. | Prediction MSE uses it; the loss itself is not in this revision. |
-| World model | Shipped. `encode`, `step`, `decode`, `predict`, and `forward`. Checkpoint directory with `config.json` and `weights.pt`. | No optimizer and no training loop. |
+| Decoder | Shipped. Small MLP, latent to reconstructed observation. | Training scores it with a weighted reconstruction MSE. |
+| World model | Shipped. `encode`, `step`, `decode`, `predict`, and `forward`. Checkpoint directory with `config.json` and `weights.pt`. | Day 4 trains these weights. The checkpoint format is unchanged. |
+| Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | Multi-step rollout loss is later. No planner. |
 | Planner | Not started. | Model-based action search. |
 | Eval | Not started. | Open-loop prediction error and offline control return. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
-pretrained weight file. Model tests need the optional `ml` extra (`torch` and
-`numpy`). CI installs a CPU build of torch before that extra. There is no
-FastAPI app and no paid API. There is no training loop in this revision.
+pretrained weight file. Model and train tests need the optional `ml` extra
+(`torch` and `numpy`). CI installs a CPU build of torch before that extra.
+There is no FastAPI app and no paid API. There is no planner and no
+multi-step rollout loss in this revision.
 
 ## Default environment
 
@@ -160,18 +163,69 @@ weights onto CPU. The init seed is not stored.
 `worldforge forward-smoke` runs one encode / step / decode. With no
 `--fixture` it uses the coexistence state `(1, 1)` and a zero dose. With
 `--fixture` it reads one stored transition from a corpus or a trajectory
-file. Neither command trains.
+file. Neither command trains. `worldforge train` does.
 
 Importing `worldforge` or `worldforge.models.config` does not import
 PyTorch. `from worldforge.models import WorldModel` does, and needs the
 `ml` extra.
 
+## Training
+
+`src/worldforge/train/` updates the Day 3 model on stored transitions. It
+does not step the environment and it does not roll the latent state past
+one step.
+
+The objective is
+
+```text
+loss = MSE(predicted_observation, next_observation)
+     + reconstruction_weight * MSE(reconstructed, observation)
+```
+
+`predicted_observation` is `decode(step(encode(observation), action))`.
+`reconstructed` is `decode(encode(observation))`. The default
+reconstruction weight is 1. A weight of 0 leaves that term out of the
+backward pass. The metrics log still records the unweighted reconstruction
+MSE.
+
+Each optimizer step calls `sample_transition_batch`. The batch seed is
+`seed + epoch * 1000003 + step`, with `epoch` and `step` starting at 0.
+The default steps per epoch are `ceil(transitions / batch_size)`, so one
+epoch is one coverage pass over the pool. Sampling is without replacement
+inside a batch and independent across steps, so a pass can repeat a
+transition. `batch_size` cannot exceed the pool.
+
+The optimizer is Adam or SGD. The device is CPU. For the length of the run
+the intra-op thread count is 1 and MKLDNN is turned off when it is
+available. Both are restored afterward, along with PyTorch's CPU generator
+state. The same `WorldModel` seed and the same `TrainConfig` seed reproduce
+the same weights in one process. `TrainConfig.seed` selects batches. The
+model constructor seed selects the initial weights. `worldforge train` passes
+its `--seed` to both.
+
+`train_world_model` writes the checkpoint directory:
+
+| File | Contents |
+| --- | --- |
+| `config.json` | Day 3 format `worldforge.checkpoint.v1`. No optimizer state. |
+| `weights.pt` | Trained `state_dict`. `load_checkpoint` reads it and ignores the files below. |
+| `metrics.jsonl` | One JSON object per epoch: `epoch`, `loss`, `prediction_loss`, `reconstruction_loss`, `steps`. |
+| `train.json` | Format `worldforge.train.v1`. Hyperparameters, counts, and `final_train_loss`. |
+
+`final_train_loss` is the last epoch's mean step loss. A step loss is the
+batch-mean objective before that step's update. `worldforge train` prints
+the epoch lines and `final_train_loss`.
+
+`--data` may be a corpus directory, `corpus.jsonl`, or one trajectory file.
+The command fits every loaded episode. To train on a split, call
+`split_trajectories` and pass `parts.train` to `train_world_model`. The CLI
+does not take a split flag. Defaults are 3 epochs, batch size 8, learning
+rate `1e-3`, seed 0, device `cpu`. On the golden fixtures that is 6 batches
+per epoch and finishes in a few seconds.
+
 ## Where later days attach
 
-Day 4 can call `WorldModel.forward` or `predict` on a
-`sample_transition_batch`, score `reconstructed` against the current
-observation and `predicted_observation` against the next observation, and
-write the result with `save_checkpoint`. That loop is not in this revision.
-The planner still proposes `Action` sequences. Prediction eval still
-compares a rolled-out trajectory with a held-out split. Control eval still
-compares return against the zero dose already used by `env-demo`.
+Day 5 can add a multi-step loss on rolled-out latents. The planner still
+proposes `Action` sequences. Prediction eval still compares a rolled-out
+trajectory with a held-out split. Control eval still compares return against
+the zero dose already used by `env-demo`. There is still no HTTP API.
