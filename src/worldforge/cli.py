@@ -5,18 +5,33 @@
 prints a trajectory summary plus the final ASCII state.
 ``collect`` writes an offline trajectory corpus.
 ``dataset-info`` summarizes a corpus directory or a trajectory file.
-These commands do not use the network, and they do not train a model.
+``model-info`` prints the Day 3 architecture sizes.
+``forward-smoke`` runs one encode / step / decode. It does not train.
+Dataset commands do not import PyTorch. The model commands need the
+optional ``ml`` extra. None of these commands use the network.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from worldforge import __version__
-from worldforge.data import collect_corpus, format_dataset_info, inspect_dataset
+from worldforge.data import collect_corpus, format_dataset_info, inspect_dataset, load_corpus
 from worldforge.data.dataset import DEFAULT_HORIZON, DEFAULT_N_EPISODES, FormatName
 from worldforge.envs import DEFAULT_ENV_ID, make_env
+from worldforge.models.config import (
+    DEFAULT_ACTION_DIM,
+    DEFAULT_DYNAMICS,
+    DEFAULT_HIDDEN_DIM,
+    DEFAULT_LATENT_DIM,
+    DEFAULT_OBS_DIM,
+    KNOWN_DYNAMICS,
+    ModelConfig,
+)
 from worldforge.rollout import POLICIES, format_summary, rollout
 
 DEFAULT_DEMO_STEPS = 12
@@ -111,7 +126,76 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="corpus directory, corpus JSONL, episode JSONL, or episode JSON",
     )
+
+    model_info = subparsers.add_parser(
+        "model-info",
+        help="Print Day 3 encoder, dynamics, and decoder sizes",
+    )
+    _add_model_config_args(model_info)
+
+    smoke = subparsers.add_parser(
+        "forward-smoke",
+        help="Encode, step, and decode one transition without training",
+    )
+    _add_model_config_args(smoke)
+    smoke.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="weight init seed (default: 0)",
+    )
+    smoke.add_argument(
+        "--fixture",
+        type=Path,
+        default=None,
+        help="corpus directory or trajectory file; default is a synthetic equilibrium state",
+    )
+    smoke.add_argument(
+        "--episode",
+        type=int,
+        default=0,
+        help="episode index inside --fixture (default: 0)",
+    )
+    smoke.add_argument(
+        "--transition",
+        type=int,
+        default=0,
+        help="transition index inside that episode (default: 0)",
+    )
     return parser
+
+
+def _add_model_config_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--obs-dim",
+        type=int,
+        default=DEFAULT_OBS_DIM,
+        help=f"observation features (default: {DEFAULT_OBS_DIM}, Lotka-Volterra)",
+    )
+    parser.add_argument(
+        "--action-dim",
+        type=int,
+        default=DEFAULT_ACTION_DIM,
+        help=f"action features (default: {DEFAULT_ACTION_DIM}, Lotka-Volterra dose)",
+    )
+    parser.add_argument(
+        "--latent-dim",
+        type=int,
+        default=DEFAULT_LATENT_DIM,
+        help=f"latent width (default: {DEFAULT_LATENT_DIM})",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=DEFAULT_HIDDEN_DIM,
+        help=f"MLP hidden width (default: {DEFAULT_HIDDEN_DIM})",
+    )
+    parser.add_argument(
+        "--dynamics",
+        choices=KNOWN_DYNAMICS,
+        default=DEFAULT_DYNAMICS,
+        help="mlp is the Day 3 residual baseline; rssm is reserved and not implemented",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
         return _collect(parser, args)
     if args.command == "dataset-info":
         return _dataset_info(parser, args)
+    if args.command == "model-info":
+        return _model_info(parser, args)
+    if args.command == "forward-smoke":
+        return _forward_smoke(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -171,6 +259,123 @@ def _dataset_info(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         return 2
     print(format_dataset_info(info))
     return 0
+
+
+def _model_info(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    _torch, world_model_cls, summary = _load_model_runtime(parser)
+    try:
+        config = _model_config_from_args(args)
+        model = world_model_cls(config, seed=0)
+    except (TypeError, ValueError, ValidationError, NotImplementedError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(summary.format_model_info(model))
+    return 0
+
+
+def _forward_smoke(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    torch, world_model_cls, summary = _load_model_runtime(parser)
+    try:
+        config = _model_config_from_args(args)
+        source, episode_index, transition_index, observation, action, nxt = _smoke_transition(
+            args, config
+        )
+        model = world_model_cls(config, seed=args.seed)
+        model.eval()
+        obs = torch.tensor(observation, dtype=torch.float32)
+        act = torch.tensor(action, dtype=torch.float32)
+        with torch.no_grad():
+            prediction = model(obs, act)
+        finite = all(
+            bool(torch.isfinite(tensor).all())
+            for tensor in (
+                prediction.latent,
+                prediction.next_latent,
+                prediction.reconstructed,
+                prediction.predicted_observation,
+            )
+        )
+        text = summary.format_forward_smoke(
+            source=source,
+            seed=args.seed,
+            episode=episode_index,
+            transition=transition_index,
+            model=model,
+            observation=observation,
+            action=action,
+            next_observation=nxt,
+            prediction=prediction,
+        )
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(text)
+    if not finite:
+        return 1
+    return 0
+
+
+def _load_model_runtime(parser: argparse.ArgumentParser) -> tuple[object, type, object]:
+    """Import torch and the world model. ``parser.error`` exits when torch is missing."""
+
+    try:
+        torch = importlib.import_module("torch")
+        world = importlib.import_module("worldforge.models.world")
+        summary = importlib.import_module("worldforge.models.summary")
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == "torch" or missing.startswith("torch."):
+            parser.error(
+                'model commands need the optional ml extra: pip install -e ".[ml]" '
+                "(a CPU build of torch is enough). "
+                f"Import failed: {exc}"
+            )
+        raise
+    return torch, world.WorldModel, summary
+
+
+def _model_config_from_args(args: argparse.Namespace) -> ModelConfig:
+    return ModelConfig(
+        obs_dim=args.obs_dim,
+        action_dim=args.action_dim,
+        latent_dim=args.latent_dim,
+        hidden_dim=args.hidden_dim,
+        dynamics=args.dynamics,
+    )
+
+
+def _smoke_transition(
+    args: argparse.Namespace,
+    config: ModelConfig,
+) -> tuple[str, int | None, int | None, list[float], list[float], list[float] | None]:
+    if args.fixture is None:
+        observation = [1.0] * config.obs_dim
+        action = [0.0] * config.action_dim
+        return "synthetic", None, None, observation, action, None
+    if args.episode < 0 or args.transition < 0:
+        raise ValueError("--episode and --transition must be >= 0")
+    if not args.fixture.exists():
+        raise ValueError(f"path does not exist: {args.fixture}")
+    episodes = load_corpus(args.fixture)
+    if args.episode >= len(episodes):
+        raise ValueError(f"episode {args.episode} is out of range for {len(episodes)} episodes")
+    episode = episodes[args.episode]
+    if args.transition >= len(episode.transitions):
+        raise ValueError(
+            f"transition {args.transition} is out of range for "
+            f"{len(episode.transitions)} transitions"
+        )
+    step = episode.transitions[args.transition]
+    observation = list(step.observation.values)
+    action = list(step.action.values)
+    nxt = list(step.next_observation.values)
+    if len(observation) != config.obs_dim or len(nxt) != config.obs_dim:
+        raise ValueError(
+            f"observation length {len(observation)} does not match obs_dim {config.obs_dim}"
+        )
+    if len(action) != config.action_dim:
+        raise ValueError(f"action length {len(action)} does not match action_dim {config.action_dim}")
+    return "fixture", args.episode, args.transition, observation, action, nxt
 
 
 def _parse_seeds(text: str) -> list[int]:
