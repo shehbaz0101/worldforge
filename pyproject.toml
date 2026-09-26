@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldforge"
+version = "0.1.0"
+description = "Latent world model for a scientific dynamics sandbox."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Shehbaz Pathan" }]
+keywords = ["world-models", "scientific-ml", "latent-dynamics", "scientific-computing"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+]
+# Optional. CI runs `ruff check` with the selection below. Not required to
+# import or run WorldForge.
+lint = ["ruff>=0.16"]
+
+[project.urls]
+Homepage = "https://github.com/shehbaz0101/worldforge"
+Repository = "https://github.com/shehbaz0101/worldforge"
+
+[project.scripts]
+worldforge = "worldforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Bug-finding checks plus import order. E501 is omitted so later days are not
+# restyled for line length. `ruff check` in CI uses this selection.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src"]
+markers = [
+    "integration: live checks for later days; Day 1 has none",
+]
