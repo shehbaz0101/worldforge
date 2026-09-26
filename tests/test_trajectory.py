@@ -99,6 +99,29 @@ def test_jsonl_requires_a_metadata_header() -> None:
         Trajectory.from_jsonl("\n")
 
 
+def test_sine_dose_is_deterministic_open_loop() -> None:
+    env = make_env(horizon=16)
+    first = rollout(env, n_steps=16, seed=4, policy="sine_dose")
+    second = rollout(make_env(horizon=16), n_steps=16, seed=4, policy="sine_dose")
+    zero = rollout(make_env(horizon=16), n_steps=16, seed=4, policy="zero")
+    assert first == second
+    assert first.transitions[0].observation == zero.transitions[0].observation
+    prey = [step.action.values[0] for step in first.transitions]
+    predator = [step.action.values[1] for step in first.transitions]
+    assert prey[0] == pytest.approx(0.0)
+    assert predator[0] == pytest.approx(0.25)
+    assert prey != predator
+    assert any(step.action.values != [0.0, 0.0] for step in first.transitions)
+    assert first.transitions[0].next_observation != zero.transitions[0].next_observation
+    for transition in first.transitions:
+        assert all(-0.25 <= value <= 0.25 for value in transition.action.values)
+    other_seed = rollout(make_env(horizon=16), n_steps=16, seed=5, policy="sine_dose")
+    assert [step.action.values for step in other_seed.transitions] == [
+        step.action.values for step in first.transitions
+    ]
+    assert other_seed.transitions[0].observation != first.transitions[0].observation
+
+
 def test_random_doses_stay_inside_a_short_episode() -> None:
     episode = rollout(make_env(horizon=32), n_steps=32, seed=11, policy="random")
     assert len(episode.transitions) == 32

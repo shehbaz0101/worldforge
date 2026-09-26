@@ -1,0 +1,51 @@
+{
+  "format": "worldforge.corpus.v1",
+  "env_id": "lotka_volterra",
+  "horizon": 8,
+  "n_episodes": 6,
+  "policy": "mixed",
+  "episodes": [
+    {
+      "index": 0,
+      "seed": 0,
+      "policy": "zero",
+      "steps": 8,
+      "file": "episodes/ep_0000.json"
+    },
+    {
+      "index": 1,
+      "seed": 1,
+      "policy": "zero",
+      "steps": 8,
+      "file": "episodes/ep_0001.json"
+    },
+    {
+      "index": 2,
+      "seed": 2,
+      "policy": "random",
+      "steps": 8,
+      "file": "episodes/ep_0002.json"
+    },
+    {
+      "index": 3,
+      "seed": 3,
+      "policy": "random",
+      "steps": 8,
+      "file": "episodes/ep_0003.json"
+    },
+    {
+      "index": 4,
+      "seed": 4,
+      "policy": "sine_dose",
+      "steps": 8,
+      "file": "episodes/ep_0004.json"
+    },
+    {
+      "index": 5,
+      "seed": 5,
+      "policy": "sine_dose",
+      "steps": 8,
+      "file": "episodes/ep_0005.json"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 """Scientific dynamics environments.
 
-``lotka_volterra`` is the only registered environment on Day 1, and it is
-the default. See :class:`worldforge.envs.lotka_volterra.LotkaVolterraEnv`
-for why this kinetic ODE is the sandbox instead of a reaction-diffusion grid.
+``lotka_volterra`` is the only registered environment, and it is the default.
+See :class:`worldforge.envs.lotka_volterra.LotkaVolterraEnv` for why this
+kinetic ODE is the sandbox instead of a reaction-diffusion grid.
 """
 
 from __future__ import annotations
@@ -23,6 +23,6 @@ def make_env(env_id: str = DEFAULT_ENV_ID, *, horizon: int = 32) -> LotkaVolterr
 
     if env_id != DEFAULT_ENV_ID:
         raise ValueError(
-            f"unknown env_id {env_id!r}; Day 1 registers {DEFAULT_ENV_ID!r} only"
+            f"unknown env_id {env_id!r}; registered environments: {DEFAULT_ENV_ID!r}"
         )
     return LotkaVolterraEnv(horizon=horizon)

@@ -1,0 +1,207 @@
+{
+  "env_id": "lotka_volterra",
+  "seed": 1,
+  "horizon": 8,
+  "transitions": [
+    {
+      "observation": {
+        "values": [
+          0.6746735173461216,
+          1.6016638580184026
+        ],
+        "t": 0.0
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.8849934592607577,
+      "next_observation": {
+        "values": [
+          0.604777405565616,
+          1.4897708648263737
+        ],
+        "t": 0.2
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.604777405565616,
+          1.4897708648263737
+        ],
+        "t": 0.2
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.8143340454458677,
+      "next_observation": {
+        "values": [
+          0.5549547676702139,
+          1.3692888131160816
+        ],
+        "t": 0.4
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.5549547676702139,
+          1.3692888131160816
+        ],
+        "t": 0.4
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.7264646632020445,
+      "next_observation": {
+        "values": [
+          0.5217449490583143,
+          1.2482096122603588
+        ],
+        "t": 0.6000000000000001
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.5217449490583143,
+          1.2482096122603588
+        ],
+        "t": 0.6000000000000001
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.6295708806821716,
+      "next_observation": {
+        "values": [
+          0.5023411042089689,
+          1.1319119848911405
+        ],
+        "t": 0.8
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.5023411042089689,
+          1.1319119848911405
+        ],
+        "t": 0.8
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.52904289762716,
+      "next_observation": {
+        "values": [
+          0.49466040693498453,
+          1.0237033045621444
+        ],
+        "t": 1.0
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.49466040693498453,
+          1.0237033045621444
+        ],
+        "t": 1.0
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.5773409145014083,
+      "next_observation": {
+        "values": [
+          0.49727156224290947,
+          0.9253875232556822
+        ],
+        "t": 1.2000000000000002
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.49727156224290947,
+          0.9253875232556822
+        ],
+        "t": 1.2000000000000002
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.6529700759219303,
+      "next_observation": {
+        "values": [
+          0.509282741050462,
+          0.8377471830276076
+        ],
+        "t": 1.4000000000000001
+      },
+      "terminated": false,
+      "truncated": false
+    },
+    {
+      "observation": {
+        "values": [
+          0.509282741050462,
+          0.8377471830276076
+        ],
+        "t": 1.4000000000000001
+      },
+      "action": {
+        "values": [
+          0.0,
+          0.0
+        ]
+      },
+      "reward": -0.708852844166639,
+      "next_observation": {
+        "values": [
+          0.5302327552947244,
+          0.7609144005386367
+        ],
+        "t": 1.6
+      },
+      "terminated": false,
+      "truncated": true
+    }
+  ]
+}

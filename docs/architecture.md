@@ -2,10 +2,10 @@
 
 WorldForge is a latent world model for a scientific dynamics sandbox. The
 target pipeline learns a compact state from trajectories, rolls it forward,
-plans with that model, and scores prediction and control offline. Day 1
-ships the environment and the trajectory record those later pieces will
-read. It does not ship an encoder, a dynamics model, a trainer, a planner,
-an eval harness, or an HTTP API.
+plans with that model, and scores prediction and control offline. The
+environment, the trajectory record, and an offline dataset builder are in
+the tree. The encoder, dynamics model, trainer, planner, eval harness, and
+HTTP API are later days.
 
 ## Components
 
@@ -20,16 +20,16 @@ flowchart LR
   planner --> control[Control eval]
 ```
 
-| Component | Day 1 | Later |
+| Component | Shipped | Later |
 | --- | --- | --- |
 | Env | Shipped. Default `lotka_volterra`. | More environments can register behind the same reset/step protocol. |
-| Dataset | Schema plus one-episode rollout to JSON and JSONL. | A replay corpus and batch sampler. |
+| Dataset | Shipped. Corpus JSONL, per-episode JSON, manifest, train/val/test split, replay batch. | Training still consumes the batch later. |
 | Encoder | Not started. | Map an observation to a compact latent. |
 | Dynamics | Not started. | One-step latent transition, then multi-step rollout loss. |
 | Planner | Not started. | Model-based action search. |
 | Eval | Not started. | Open-loop prediction error and offline control return. |
 
-Day 1 stays offline. There is no FastAPI app and no paid API.
+Collection and the unit tests stay offline. There is no FastAPI app and no paid API.
 
 ## Default environment
 
@@ -65,15 +65,40 @@ models. Extra fields are rejected. A trajectory's metadata is `env_id`,
 `seed`, and `horizon`. `horizon` is the number of steps requested.
 `transitions` is shorter when the episode ends first.
 
-JSON is one document. JSONL is one trajectory file: a `meta` line, then one
-`transition` line per step. `rollout` builds a trajectory from an
-environment with either a zero dose or a seeded uniform dose.
+JSON is one document. Single-episode JSONL is one trajectory file: a `meta`
+line, then one `transition` line per step. `rollout` builds a trajectory
+with a zero dose, a seeded uniform dose, or an open-loop sine dose.
+`sine_dose` scales a sine of the step index into the action bounds. Component
+`i` has phase `i * pi / 2`. The period is 16 steps. The dose does not use
+the seed.
+
+## Corpus
+
+`worldforge collect` writes a directory:
+
+| File | Contents |
+| --- | --- |
+| `manifest.json` | Format `worldforge.corpus.v1`. `env_id`, requested `horizon`, and one record per episode: `index`, `seed`, `policy`, `steps`, and an optional relative `file`. Top-level `policy` is `mixed` when episodes differ. |
+| `corpus.jsonl` | One trajectory JSON object per line (`env_id`, `seed`, `horizon`, `transitions`). Present when the jsonl format is requested. |
+| `episodes/ep_XXXX.json` | One indented trajectory document per episode. Present when the json format is requested. |
+
+`load_corpus` reads the directory (preferring `corpus.jsonl`), a corpus JSONL
+file, a single-episode JSONL file, or one trajectory JSON file.
+`split_trajectories` assigns episodes with the largest-remainder method and
+shuffles a canonical order with `random.Random(seed)`. The same episodes and
+the same seed produce the same train, val, and test tuples.
+`sample_transition_batch` draws stored transitions without replacement. It
+does not step the environment.
+
+The golden set is `tests/fixtures/trajectories/`: six episodes, horizon 8,
+seeds 0–5, policies `zero`, `random`, and `sine_dose`. Regenerate with
+`python scripts/regenerate_fixtures.py` and commit the files. CI loads them
+and does not rebuild them.
 
 ## Where later days attach
 
-The dataset day reads these JSONL files. The encoder reads `Observation`.
-The dynamics model predicts the next observation, or a latent that decodes
-to it. The planner proposes `Action` sequences. Prediction eval compares a
-rolled-out trajectory with a held-out one. Control eval compares return
-against the zero dose already used by `env-demo`. None of that is
-implemented in this revision.
+The encoder reads `Observation` from these corpora. The dynamics model
+predicts the next observation, or a latent that decodes to it. The planner
+proposes `Action` sequences. Prediction eval compares a rolled-out trajectory
+with a held-out split. Control eval compares return against the zero dose
+already used by `env-demo`. Those pieces are not in this revision.
