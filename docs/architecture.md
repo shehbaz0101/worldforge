@@ -4,8 +4,8 @@ WorldForge is a latent world model for a scientific dynamics sandbox. The
 target pipeline learns a compact state from trajectories, rolls it forward,
 plans with that model, and scores prediction and control offline. The
 environment, the trajectory record, an offline dataset builder, a latent
-model, a one-step training loop, and an open-loop prediction eval are in
-the tree. The planner and the HTTP API are later days.
+model, a one-step training loop, an open-loop prediction eval, and a
+model-based planner are in the tree. The HTTP API is a later day.
 
 ## Components
 
@@ -32,15 +32,15 @@ flowchart LR
 | Dynamics | Shipped. Day 3 baseline: deterministic residual MLP, `(z, a) -> z_next`. | `dynamics="rssm"` is reserved and raises `NotImplementedError`. A multi-step training loss is later. |
 | Decoder | Shipped. Small MLP, latent to reconstructed observation. | Training scores it with a weighted reconstruction MSE. |
 | World model | Shipped. `encode`, `step`, `decode`, `predict`, and `forward`. Checkpoint directory with `config.json` and `weights.pt`. | Day 4 trains these weights. Day 5 loads them for an open-loop rollout. The checkpoint format is unchanged. |
-| Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | A multi-step rollout loss is later. No planner. |
-| Planner | Not started. | Day 6 model-based action search. |
-| Eval | Shipped. Open-loop latent rollout and per-horizon MSE, `worldforge rollout` and `worldforge eval-predict`. | Offline control return is later. |
+| Train | Shipped. One-step MSE, Adam or SGD, JSONL epoch log, `worldforge train`. | A multi-step rollout loss is later. |
+| Planner | Shipped. CEM over a short clipped action sequence, scored by latent rollouts. `worldforge plan`. | A learned reward, or a longer horizon, is later. |
+| Eval | Shipped. Open-loop latent rollout and per-horizon MSE (`worldforge rollout`, `worldforge eval-predict`). Closed-loop planning regret (`worldforge eval-plan`). | Holding out val and test inside the eval commands is still up to the caller. |
 
 Collection and the unit tests stay offline. They do not download a dataset or a
 pretrained weight file. Model, train, and prediction tests need the optional
 `ml` extra (`torch` and `numpy`). CI installs a CPU build of torch before
-that extra. There is no FastAPI app and no paid API. There is no planner and
-no multi-step training loss in this revision.
+that extra. There is no FastAPI app and no paid API. There is no multi-step
+training loss in this revision.
 
 ## Default environment
 
@@ -288,10 +288,96 @@ The file format is `worldforge.predict.v1`:
 On the golden fixtures the default score is 6 episodes and horizons 1..8.
 That run does not train and finishes in about a second on CPU.
 
+## Planner
+
+`src/worldforge/plan/` searches action sequences with the Day 3 model. It
+does not train, and the search itself does not step the environment.
+Closed-loop eval does step the environment, after the search has chosen
+an action.
+
+The objective is `regulation_l1`. A candidate sequence is rolled with
+`rollout_latent`: the encoder runs once, then each action steps the latent
+and the decoder produces an observation. The score is the undiscounted sum
+of regulation rewards on those decoded observations. The reward is the
+negative L1 distance from a target. When the observation width is 2, the
+target is the Lotka-Volterra coexistence equilibrium `(1, 1)`, and the
+number matches `LotkaVolterraEnv.step`. The initial observation is not
+scored, because the environment rewards the state after the dose. Higher
+is better. For any other observation width the same reduction uses a
+target of ones. `eval-plan` always builds the default environment, so it
+uses the equilibrium.
+
+The search is a small cross-entropy method. The population is an
+axis-aligned Gaussian over the whole action sequence. The mean starts at
+the zero dose, and that zero sequence is scored, so the returned plan is
+at least as good as doing nothing under the model. Each iteration draws
+`n_samples` sequences from a private CPU generator, clips every component
+to the action bounds, and keeps the top `elite_fraction` (at least one).
+The mean and standard deviation become the elite statistics. The standard
+deviation is floored at `min_std` so a later iteration can still move.
+The sequence that is returned is the best candidate scored during the
+search, including each iteration's clipped mean. Only that sequence is
+returned; the Gaussian is not saved.
+
+Defaults are intentionally small: horizon 3, 8 samples, 2 iterations,
+elite fraction 0.25. `init_std` defaults to the dose limit `0.25`. The
+call pins intra-op threads to 1 and turns MKLDNN off when it is present,
+then restores threads, MKLDNN, and the global CPU generator. The same
+model, observation, and `CEMConfig.seed` repeat the same sequence.
+
+`worldforge plan` writes `worldforge.action_sequence.v1`: the observation,
+the clipped actions, and `predicted_return`. `--obs` is a comma-separated
+starting state. `--data` uses the first observation of one stored episode.
+With neither flag the start is the regulation target, `(1, 1)` for the
+default width. `--checkpoint` loads a Day 3 directory and ignores the
+architecture flags. `--seed` draws the CEM samples and, when no checkpoint
+is given, initializes the weights.
+
+## Closed-loop regret
+
+`planning_regret` is receding-horizon control. At every environment step
+it plans from the real observation and applies only the first action, then
+repeats until `n_steps` or termination. The environment horizon is
+`n_steps`. The same reset seed is rolled twice more: a zero dose, and the
+Day 1 `random` policy (`random.Random(env_seed)` inside the action bounds).
+Those two baselines do not use the CEM seed.
+
+The three returns are sums of the environment reward. `baseline_best` is
+the larger of the zero-dose return and the random-dose return. `regret`
+is `baseline_best - planner_return`. Negative regret means the planner
+beat both baselines on the real environment. Positive regret means the
+better baseline scored higher. An untrained model can land on either side
+of zero; the report records the gap either way. Beating the zero dose
+inside the model does not imply beating it on the environment.
+
+`worldforge eval-plan` writes `worldforge.plan.v1`. `actions` are the
+doses that were applied, one per environment step, not the planning
+horizon. `horizon` is the CEM horizon used at each replan. `seed` is the
+environment seed. `cem_seed` draws the candidates. Defaults are 4
+environment steps and the CEM defaults above. On CPU that command
+finishes in about a second.
+
+| Field | Contents |
+| --- | --- |
+| `format` | `worldforge.plan.v1` |
+| `objective` | `regulation_l1` |
+| `regret_definition` | `baseline_best - planner_return` |
+| `env_id` | `lotka_volterra` |
+| `seed` | Environment reset seed, also the random baseline's seed. |
+| `cem_seed` | CEM sample seed. |
+| `n_steps` | Requested closed-loop steps. |
+| `planner_steps` | Steps the planner actually took. |
+| `horizon`, `n_samples`, `n_iterations`, `elite_fraction` | CEM settings. |
+| `initial_observation` | State after reset. |
+| `planner_return`, `zero_return`, `random_return` | Environment returns. Higher is better. |
+| `baseline_best` | `max(zero_return, random_return)`. |
+| `regret` | `baseline_best - planner_return`. |
+| `actions` | Executed doses, length `planner_steps`. |
+| `checkpoint` | Checkpoint path, or `null`. |
+
 ## Where later days attach
 
-Day 6 can search action sequences with this model. Control eval can compare
-the planner's return with the zero dose already used by `env-demo`. A
+Day 7 can put the checkpoint and these reports behind an HTTP API. A
 multi-step training loss can backprop through `rollout_latent`. The CLI
 still fits every episode in `--data` when training; holding out val and
 test stays with `split_trajectories`. There is still no HTTP API.

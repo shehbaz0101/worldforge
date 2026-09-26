@@ -5,7 +5,7 @@ dynamics sandbox. The aim is compact state dynamics learned from trajectories,
 multi-step rollouts, model-based planning, and offline prediction and control
 evals.
 
-**Status:** Day 5.
+**Status:** Day 6.
 
 Day 1 added the package, the default Lotka-Volterra environment, the
 trajectory schema, and pytest CI on Python 3.11 and 3.12. Day 2 collects
@@ -23,6 +23,15 @@ rolls a checkpoint, or an untrained seeded model, open-loop on stored
 actions and decodes predicted observations at horizons 1..H. `worldforge
 rollout` and `worldforge eval-predict` write `worldforge.predict.v1` with
 `horizons`, `mse_by_h`, and `n_episodes` (plus MAE and a residual standard
-deviation by horizon). Torch is the optional `ml` extra. The planner and
-the HTTP API are later days. See [docs/architecture.md](docs/architecture.md)
-and [docs/daily/2026-09-26-day5.md](docs/daily/2026-09-26-day5.md).
+deviation by horizon). Day 6 plans with that model. CEM searches a short
+clipped action sequence. The objective is `regulation_l1`: the
+undiscounted sum of Lotka-Volterra regulation rewards on decoded states,
+the same negative L1 distance from `(1, 1)` that the environment returns.
+`worldforge plan` writes one sequence (`worldforge.action_sequence.v1`).
+`worldforge eval-plan` replans on the real environment for a few steps
+and writes `worldforge.plan.v1`. `regret` is `baseline_best -
+planner_return`, where `baseline_best` is the better of a zero dose and
+the Day 1 random dose. Negative regret means the planner beat both.
+Torch is the optional `ml` extra. The HTTP API is a later day. See
+[docs/architecture.md](docs/architecture.md) and
+[docs/daily/2026-09-26-day6.md](docs/daily/2026-09-26-day6.md).
