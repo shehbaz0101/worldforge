@@ -1,0 +1,23 @@
+{
+  "format": "worldforge.corpus.v1",
+  "env_id": "lotka_volterra",
+  "horizon": 4,
+  "n_episodes": 2,
+  "policy": "mixed",
+  "episodes": [
+    {
+      "index": 0,
+      "seed": 0,
+      "policy": "zero",
+      "steps": 4,
+      "file": "episodes/ep_0000.json"
+    },
+    {
+      "index": 1,
+      "seed": 1,
+      "policy": "random",
+      "steps": 4,
+      "file": "episodes/ep_0001.json"
+    }
+  ]
+}

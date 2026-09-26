@@ -34,8 +34,9 @@ dev = [
     "httpx2>=2.0",
 ]
 # Day 3 latent model, the Day 4 trainer, the Day 5 open-loop eval, the Day 6
-# planner, and the Day 7 predict, plan, and train routes. Not required for
-# the environment, schema, corpus commands, `worldforge serve`, or GET /health.
+# planner, the Day 7 predict, plan, and train routes, and Day 9
+# `worldforge demo`. Not required for the environment, schema, corpus
+# commands, `worldforge serve`, or GET /health.
 # CI installs a CPU wheel before this extra so the test job does not pull a
 # CUDA build. Model, train, prediction, planning, and API tests import torch.
 ml = [
