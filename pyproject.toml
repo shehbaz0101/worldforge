@@ -21,16 +21,23 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.6,<3",
+    # Day 7 HTTP API. `worldforge serve` imports these. Prediction, planning,
+    # and training routes still need the ml extra; GET /health does not.
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
+    # TestClient follows Starlette and imports httpx2 when it is installed.
+    "httpx2>=2.0",
 ]
-# Day 3 latent model, the Day 4 trainer, the Day 5 open-loop eval, and the
-# Day 6 planner. Not required for the environment, schema, or corpus commands.
+# Day 3 latent model, the Day 4 trainer, the Day 5 open-loop eval, the Day 6
+# planner, and the Day 7 predict, plan, and train routes. Not required for
+# the environment, schema, corpus commands, `worldforge serve`, or GET /health.
 # CI installs a CPU wheel before this extra so the test job does not pull a
-# CUDA build. Model, train, prediction, and planning tests import torch.
+# CUDA build. Model, train, prediction, planning, and API tests import torch.
 ml = [
     "torch>=2.2,<3",
     # Torch warns on import when NumPy is missing. The model code does not
@@ -66,5 +73,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["src"]
 markers = [
-    "integration: live checks for later days; none are registered yet",
+    "integration: live checks; none are registered. HTTP tests use TestClient and are not marked.",
 ]

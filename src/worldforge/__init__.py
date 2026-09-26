@@ -4,7 +4,9 @@ The environment, trajectory schema, and offline corpus import without
 PyTorch. The Day 3 latent model is :mod:`worldforge.models`, the Day 4
 trainer is :mod:`worldforge.train`, the Day 5 open-loop eval is
 :mod:`worldforge.eval`, and the Day 6 planner is :mod:`worldforge.plan`.
-Those four need the optional ``ml`` extra (``torch``).
+Those four need the optional ``ml`` extra (``torch``). The Day 7 HTTP
+API is :mod:`worldforge.api`. Importing it loads FastAPI and does not
+load PyTorch; the predict, plan, and train routes do, when called.
 """
 
 from worldforge.data import (
