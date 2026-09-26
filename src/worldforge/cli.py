@@ -7,8 +7,9 @@ prints a trajectory summary plus the final ASCII state.
 ``dataset-info`` summarizes a corpus directory or a trajectory file.
 ``model-info`` prints the Day 3 architecture sizes.
 ``forward-smoke`` runs one encode / step / decode. It does not train.
-Dataset commands do not import PyTorch. The model commands need the
-optional ``ml`` extra. None of these commands use the network.
+``train`` fits that model on an offline corpus and writes a checkpoint.
+Dataset commands do not import PyTorch. The model and train commands need
+the optional ``ml`` extra. None of these commands use the network.
 """
 
 from __future__ import annotations
@@ -162,6 +163,71 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="transition index inside that episode (default: 0)",
     )
+
+    train = subparsers.add_parser(
+        "train",
+        help="Fit the baseline world model on an offline corpus and write a checkpoint",
+    )
+    train.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="fixture directory, corpus JSONL, or one trajectory file",
+    )
+    train.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="checkpoint directory (config.json, weights.pt, metrics.jsonl, train.json)",
+    )
+    train.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="optimizer passes (default: 3)",
+    )
+    train.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="transitions per replay batch (default: 8)",
+    )
+    train.add_argument(
+        "--lr",
+        type=float,
+        default=1e-3,
+        help="optimizer learning rate (default: 1e-3)",
+    )
+    train.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="weight init and replay seed (default: 0)",
+    )
+    train.add_argument(
+        "--device",
+        default="cpu",
+        help="torch device; this command accepts cpu only (default: cpu)",
+    )
+    train.add_argument(
+        "--recon-weight",
+        type=float,
+        default=1.0,
+        help="weight on reconstruction MSE; 0 trains prediction only (default: 1)",
+    )
+    train.add_argument(
+        "--steps-per-epoch",
+        type=int,
+        default=None,
+        help="replay batches per epoch (default: ceil(transitions / batch size))",
+    )
+    train.add_argument(
+        "--optimizer",
+        choices=("adam", "sgd"),
+        default="adam",
+        help="adam or sgd (default: adam)",
+    )
+    _add_model_config_args(train)
     return parser
 
 
@@ -214,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         return _model_info(parser, args)
     if args.command == "forward-smoke":
         return _forward_smoke(parser, args)
+    if args.command == "train":
+        return _train(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -326,12 +394,62 @@ def _load_model_runtime(parser: argparse.ArgumentParser) -> tuple[object, type, 
         missing = getattr(exc, "name", None) or ""
         if missing == "torch" or missing.startswith("torch."):
             parser.error(
-                'model commands need the optional ml extra: pip install -e ".[ml]" '
+                'model and train commands need the optional ml extra: pip install -e ".[ml]" '
                 "(a CPU build of torch is enough). "
                 f"Import failed: {exc}"
             )
         raise
     return torch, world.WorldModel, summary
+
+
+def _train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if not args.data.exists():
+        parser.error(f"path does not exist: {args.data}")
+    world_model_cls, train_api = _load_train_runtime(parser)
+    try:
+        config = train_api.TrainConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            seed=args.seed,
+            device=args.device,
+            reconstruction_weight=args.recon_weight,
+            steps_per_epoch=args.steps_per_epoch,
+            optimizer=args.optimizer,
+        )
+        model = world_model_cls(_model_config_from_args(args), seed=args.seed)
+        episodes = load_corpus(args.data)
+        result = train_api.train_world_model(
+            model,
+            episodes,
+            config,
+            out=args.out,
+            data_path=args.data,
+        )
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(train_api.format_train_report(result))
+    return 0
+
+
+def _load_train_runtime(parser: argparse.ArgumentParser) -> tuple[type, object]:
+    """Import the world model and the trainer. ``parser.error`` exits without torch."""
+
+    _load_model_runtime(parser)
+    try:
+        world = importlib.import_module("worldforge.models.world")
+        train_api = importlib.import_module("worldforge.train")
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == "torch" or missing.startswith("torch."):
+            parser.error(
+                'model and train commands need the optional ml extra: pip install -e ".[ml]" '
+                "(a CPU build of torch is enough). "
+                f"Import failed: {exc}"
+            )
+        raise
+    return world.WorldModel, train_api
 
 
 def _model_config_from_args(args: argparse.Namespace) -> ModelConfig:

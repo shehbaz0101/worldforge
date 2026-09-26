@@ -23,3 +23,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Local training outputs (Day 4 checkpoints and metrics)
+checkpoints/
