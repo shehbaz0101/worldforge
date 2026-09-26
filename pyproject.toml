@@ -70,7 +70,10 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# Keep pytest's tmp_path under the repo. The Day 8 sandbox defaults to the
+# current directory, and the existing corpus and checkpoint tests pass
+# absolute paths from that temporary tree.
+addopts = "-ra --basetemp=.pytest-tmp"
 pythonpath = ["src"]
 markers = [
     "integration: live checks; none are registered. HTTP tests use TestClient and are not marked.",

@@ -2,7 +2,9 @@
 
 Importing this module does not import PyTorch. Each function loads the
 optional ``ml`` extra on first use and raises :class:`MlExtraMissing`
-when that import fails. Paths are local. Nothing here opens a socket.
+when that import fails. User paths are resolved inside the data root
+before that import. Nothing here opens a socket. An omitted ``out`` on
+``POST /train`` is a new directory inside the data root.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from worldforge.api.schemas import (
 )
 from worldforge.data import load_corpus
 from worldforge.envs.lotka_volterra import ACTION_LIMIT
+from worldforge.sandbox import data_root, resolve_user_path
 from worldforge.schemas import Trajectory
 
 ML_EXTRA_DETAIL = (
@@ -41,6 +44,7 @@ class MlExtraMissing(RuntimeError):
 def open_loop(body: PredictRequest) -> PredictResponse:
     """Score stored actions and return a ``worldforge.predict.v1`` body."""
 
+    data_path, checkpoint_path = _sandboxed_inputs(body.data, body.checkpoint)
     _torch, world, checkpoint_mod, predict_api = _import_ml(
         "worldforge.models.world",
         "worldforge.models.checkpoint",
@@ -51,9 +55,9 @@ def open_loop(body: PredictRequest) -> PredictResponse:
         checkpoint_mod.load_checkpoint,
         body,
         seed=body.seed,
-        checkpoint=body.checkpoint,
+        checkpoint=checkpoint_path,
     )
-    episodes, data_note = _episodes(body.data, body.trajectories)
+    episodes, data_note = _episodes(data_path, body.trajectories)
     report = predict_api.open_loop_metrics(
         model,
         episodes,
@@ -77,6 +81,7 @@ def open_loop(body: PredictRequest) -> PredictResponse:
 def plan_sequence(body: PlanRequest) -> ActionSequenceResponse:
     """Search one clipped action sequence and return the Day 6 document."""
 
+    data_path, checkpoint_path = _sandboxed_inputs(body.data, body.checkpoint)
     torch_mod, world, checkpoint_mod, plan_api = _import_ml(
         "worldforge.models.world",
         "worldforge.models.checkpoint",
@@ -87,9 +92,9 @@ def plan_sequence(body: PlanRequest) -> ActionSequenceResponse:
         checkpoint_mod.load_checkpoint,
         body,
         seed=body.seed,
-        checkpoint=body.checkpoint,
+        checkpoint=checkpoint_path,
     )
-    observation = _plan_observation(body, model.config.obs_dim, plan_api)
+    observation = _plan_observation(body, model.config.obs_dim, plan_api, data_path)
     config = _cem_config(body, model.config.action_dim, plan_api.CEMConfig)
     planned = plan_api.plan_actions(
         model,
@@ -120,6 +125,7 @@ def plan_sequence(body: PlanRequest) -> ActionSequenceResponse:
 def plan_regret(body: EvalPlanRequest) -> PlanReportResponse:
     """Roll closed-loop CEM and both baselines. Returns ``worldforge.plan.v1``."""
 
+    _data_path, checkpoint_path = _sandboxed_inputs(None, body.checkpoint)
     _torch, world, checkpoint_mod, plan_api = _import_ml(
         "worldforge.models.world",
         "worldforge.models.checkpoint",
@@ -130,7 +136,7 @@ def plan_regret(body: EvalPlanRequest) -> PlanReportResponse:
         checkpoint_mod.load_checkpoint,
         body,
         seed=body.seed,
-        checkpoint=body.checkpoint,
+        checkpoint=checkpoint_path,
     )
     config = _cem_config(body, model.config.action_dim, plan_api.CEMConfig)
     report = plan_api.planning_regret(
@@ -167,15 +173,18 @@ def plan_regret(body: EvalPlanRequest) -> PlanReportResponse:
 def train(body: TrainRequest) -> TrainResponse:
     """Fit one short CPU run and return the final loss and checkpoint path."""
 
+    root = data_root()
+    data_path = _existing_user_path(body.data, label="data", root=root)
+    out_path = None if body.out is None else resolve_user_path(body.out, label="out", root=root)
     _torch, world, train_api = _import_ml(
         "worldforge.models.world",
         "worldforge.train",
     )
-    episodes, data_note = _episodes(body.data, body.trajectories)
-    if body.out is None:
-        directory: str | Path = tempfile.mkdtemp(prefix="worldforge-train-")
+    episodes, data_note = _episodes(data_path, body.trajectories)
+    if out_path is None:
+        directory: str | Path = Path(tempfile.mkdtemp(prefix="worldforge-train-", dir=root))
     else:
-        directory = Path(body.out)
+        directory = out_path
     config = train_api.TrainConfig(
         epochs=body.epochs,
         batch_size=body.batch_size,
@@ -224,28 +233,47 @@ def _reraise_ml(exc: ImportError) -> NoReturn:
     raise exc
 
 
+def _sandboxed_inputs(
+    data: str | None,
+    checkpoint: str | None,
+) -> tuple[Path | None, Path | None]:
+    """Resolve request paths inside the data root before any model import."""
+
+    root = data_root()
+    return (
+        _existing_user_path(data, label="data", root=root),
+        _existing_user_path(checkpoint, label="checkpoint", root=root),
+    )
+
+
+def _existing_user_path(value: str | None, *, label: str, root: Path) -> Path | None:
+    if value is None:
+        return None
+    path = resolve_user_path(value, label=label, root=root)
+    if not path.exists():
+        raise ValueError(f"path does not exist: {path}")
+    return path
+
+
 def _load_model(
     world_model_cls: type,
     load_checkpoint: object,
     spec: ModelSpec,
     *,
     seed: int,
-    checkpoint: str | None,
+    checkpoint: Path | None,
 ) -> tuple[object, str | None]:
     if checkpoint is None:
         model = world_model_cls(spec.to_config(), seed=seed)
         return model, None
-    path = Path(checkpoint)
-    if not path.exists():
-        raise ValueError(f"path does not exist: {path}")
     if not callable(load_checkpoint):
         raise TypeError("load_checkpoint must be callable")
-    model = load_checkpoint(path)
-    return model, str(path)
+    model = load_checkpoint(checkpoint)
+    return model, str(checkpoint)
 
 
 def _episodes(
-    data: str | None,
+    data: Path | None,
     trajectories: list[Trajectory] | None,
 ) -> tuple[list[Trajectory], str]:
     if data is not None and trajectories is not None:
@@ -256,13 +284,15 @@ def _episodes(
         return list(trajectories), "inline"
     if data is None:
         raise ValueError("provide a data path or inline trajectories")
-    path = Path(data)
-    if not path.exists():
-        raise ValueError(f"path does not exist: {path}")
-    return load_corpus(path), str(path)
+    return load_corpus(data), str(data)
 
 
-def _plan_observation(body: PlanRequest, obs_dim: int, plan_api: object) -> list[float]:
+def _plan_observation(
+    body: PlanRequest,
+    obs_dim: int,
+    plan_api: object,
+    data_path: Path | None,
+) -> list[float]:
     # plan_api is the worldforge.plan module. Imported lazily with torch.
     if body.observation is not None:
         if len(body.observation) != obs_dim:
@@ -270,8 +300,8 @@ def _plan_observation(body: PlanRequest, obs_dim: int, plan_api: object) -> list
                 f"observation length {len(body.observation)} does not match obs_dim {obs_dim}"
             )
         return list(body.observation)
-    if body.data is not None:
-        episodes, _note = _episodes(body.data, None)
+    if data_path is not None:
+        episodes, _note = _episodes(data_path, None)
         if body.episode >= len(episodes):
             raise ValueError(f"episode {body.episode} is out of range for {len(episodes)} episodes")
         episode = episodes[body.episode]
