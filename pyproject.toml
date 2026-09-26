@@ -27,10 +27,10 @@ dependencies = [
 dev = [
     "pytest>=8.3",
 ]
-# Day 3 latent model, the Day 4 trainer, and the Day 5 open-loop eval.
-# Not required for the environment, schema, or corpus commands. CI installs
-# a CPU wheel before this extra so the test job does not pull a CUDA build.
-# Model, train, and prediction tests import torch and need this extra.
+# Day 3 latent model, the Day 4 trainer, the Day 5 open-loop eval, and the
+# Day 6 planner. Not required for the environment, schema, or corpus commands.
+# CI installs a CPU wheel before this extra so the test job does not pull a
+# CUDA build. Model, train, prediction, and planning tests import torch.
 ml = [
     "torch>=2.2,<3",
     # Torch warns on import when NumPy is missing. The model code does not

@@ -2,7 +2,7 @@
 
 WorldForge is a research-grade latent world model for a scientific dynamics sandbox. It learns a compact state from trajectories of a deterministic laboratory-style system, rolls that state forward for many steps, and uses the model for planning. Offline evals measure open-loop prediction and control.
 
-This revision adds Day 5 open-loop prediction on top of the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
+This revision adds a Day 6 model-based planner on top of the Day 5 open-loop eval, the Day 4 trainer, the Day 3 latent model, and the offline corpus. `worldforge collect` rolls the default Lotka-Volterra environment with a zero dose, a seeded random dose, or an open-loop sine dose, and writes a corpus. `worldforge dataset-info` summarizes a corpus file or directory. `worldforge model-info` prints the encoder, dynamics, and decoder sizes. `worldforge forward-smoke` runs one encode, step, and decode and does not train. `worldforge train` fits the baseline on a corpus and writes a checkpoint. `worldforge rollout` and `worldforge eval-predict` roll that checkpoint (or an untrained seeded model) open-loop and write per-horizon MSE. `worldforge plan` searches one short action sequence with CEM. `worldforge eval-plan` runs that planner closed-loop and writes regret against a zero dose and a random dose. A checked-in fixture set under `tests/fixtures/trajectories/` keeps tests offline. Nothing in this revision calls the network or downloads a weight file.
 
 ## Install
 
@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-The environment, schema, and corpus commands do not need PyTorch. The model, the trainer, and the open-loop eval need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
+The environment, schema, and corpus commands do not need PyTorch. The model, the trainer, the open-loop eval, and the planner need the `ml` extra. Install a CPU build of torch first so pip does not replace it with a larger CUDA wheel, then install the extra (torch plus numpy; numpy only keeps the torch import from warning):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -133,7 +133,43 @@ report = open_loop_metrics(model, episodes, horizon=8, checkpoint="checkpoints/d
 print(report.horizons, report.mse_by_h, report.n_episodes)
 ```
 
-`import worldforge` does not import torch. Importing `worldforge.eval` does.
+`import worldforge` does not import torch. Importing `worldforge.eval` or `worldforge.plan` does.
+
+`plan` searches one clipped action sequence with the cross-entropy method. Candidates are rolled in latent space. The score is the sum of regulation rewards on the decoded states: negative L1 distance from the coexistence equilibrium `(1, 1)`, the same reward the environment uses. The search does not step the environment. Defaults are a horizon of 3, 8 samples, and 2 iterations, so the command stays small. `--obs` sets the starting state. `--data` uses the first observation of a stored episode. Without either, the start is the equilibrium.
+
+`eval-plan` is closed loop. At each environment step it plans again and applies only the first action. It then rolls the same seed with a zero dose and with the seeded random dose. `regret` is `baseline_best - planner_return`. `baseline_best` is the better of those two baselines. A negative regret means the planner scored higher than both. The JSON format is `worldforge.plan.v1`.
+
+```bash
+worldforge plan \
+  --obs 1.5,0.6 \
+  --out reports/plan.json \
+  --horizon 3 \
+  --samples 8 \
+  --iterations 2 \
+  --seed 0
+
+worldforge eval-plan \
+  --out reports/plan-regret.json \
+  --n-steps 4 \
+  --env-seed 0 \
+  --horizon 3 \
+  --samples 8 \
+  --iterations 2 \
+  --seed 0
+```
+
+```python
+import torch
+
+from worldforge.models import ModelConfig, WorldModel
+from worldforge.plan import CEMConfig, plan_actions, planning_regret
+
+model = WorldModel(ModelConfig(), seed=0)
+plan = plan_actions(model, torch.tensor([1.5, 0.6]), CEMConfig(horizon=3, seed=0))
+print(plan.actions, plan.predicted_return)
+report = planning_regret(model, n_steps=4, env_seed=0, cem=CEMConfig(seed=0))
+print(report.planner_return, report.zero_return, report.random_return, report.regret)
+```
 
 ## Roadmap
 
@@ -141,10 +177,10 @@ print(report.horizons, report.mse_by_h, report.n_episodes)
 2. **Day 2 — Dataset.** Collect JSONL trajectories, split them, and sample a replay batch.
 3. **Day 3 — Encoder and baseline dynamics.** Latent MLP, one-step residual transition, decoder, checkpoint.
 4. **Day 4 — Training loop.** One-step prediction MSE, optional reconstruction weight, Adam or SGD, checkpoint, and `worldforge train`.
-5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`. This revision.
-6. **Day 6 — Planner.** Model-based action search.
-7. **Day 7 — HTTP API.** A FastAPI service over the checkpoint and the prediction report.
-8. **Later.** Multi-step rollout loss, a longer saved training run, and offline control return against the zero dose.
+5. **Day 5 — Open-loop prediction.** Multi-horizon latent rollout, per-horizon MSE, and `worldforge rollout` / `worldforge eval-predict`.
+6. **Day 6 — Planner.** CEM on latent rollouts, closed-loop regret against the zero dose and a random dose, `worldforge plan` / `worldforge eval-plan`. This revision.
+7. **Day 7 — HTTP API.** A FastAPI service over the checkpoint and the reports.
+8. **Later.** Multi-step rollout loss, and a longer saved training run.
 
 ## Docs
 
@@ -154,6 +190,7 @@ print(report.horizons, report.mse_by_h, report.n_episodes)
 - [Day 3 log](docs/daily/2026-09-26-day3.md)
 - [Day 4 log](docs/daily/2026-09-26-day4.md)
 - [Day 5 log](docs/daily/2026-09-26-day5.md)
+- [Day 6 log](docs/daily/2026-09-26-day6.md)
 - [Project status](PROJECT_STATUS.md)
 
 ## Tests
@@ -164,7 +201,7 @@ pip install -e ".[dev,ml]"
 pytest
 ```
 
-`tests/test_models.py`, `tests/test_train.py`, and `tests/test_predict.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
+`tests/test_models.py`, `tests/test_train.py`, `tests/test_predict.py`, and `tests/test_plan.py` import torch, so the full suite needs the `ml` extra. The train tests run a few optimizer steps on the golden fixtures. The prediction tests roll those same fixtures and do not train. The planner tests use a tiny network or a fixed toy dynamics map, with a handful of CEM samples. CI runs that suite on Python 3.11 and 3.12 after installing the CPU wheel. No test uses the network or downloads weights. Optional lint:
 
 ```bash
 pip install -e ".[lint]"

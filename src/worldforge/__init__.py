@@ -2,9 +2,9 @@
 
 The environment, trajectory schema, and offline corpus import without
 PyTorch. The Day 3 latent model is :mod:`worldforge.models`, the Day 4
-trainer is :mod:`worldforge.train`, and the Day 5 open-loop eval is
-:mod:`worldforge.eval`. Those three need the optional ``ml`` extra
-(``torch``).
+trainer is :mod:`worldforge.train`, the Day 5 open-loop eval is
+:mod:`worldforge.eval`, and the Day 6 planner is :mod:`worldforge.plan`.
+Those four need the optional ``ml`` extra (``torch``).
 """
 
 from worldforge.data import (

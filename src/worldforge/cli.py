@@ -9,15 +9,18 @@ prints a trajectory summary plus the final ASCII state.
 ``forward-smoke`` runs one encode / step / decode. It does not train.
 ``train`` fits that model on an offline corpus and writes a checkpoint.
 ``rollout`` and ``eval-predict`` score an open-loop latent rollout and write
-a prediction report. Dataset commands do not import PyTorch. The model,
-train, and prediction commands need the optional ``ml`` extra. None of
-these commands use the network.
+a prediction report. ``plan`` searches one action sequence with CEM.
+``eval-plan`` rolls that planner on the environment and writes planning
+regret against a zero dose and a random dose. Dataset commands do not
+import PyTorch. The model, train, prediction, and planning commands need
+the optional ``ml`` extra. None of these commands use the network.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import math
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -26,6 +29,7 @@ from worldforge import __version__
 from worldforge.data import collect_corpus, format_dataset_info, inspect_dataset, load_corpus
 from worldforge.data.dataset import DEFAULT_HORIZON, DEFAULT_N_EPISODES, FormatName
 from worldforge.envs import DEFAULT_ENV_ID, make_env
+from worldforge.envs.lotka_volterra import ACTION_LIMIT
 from worldforge.models.config import (
     DEFAULT_ACTION_DIM,
     DEFAULT_DYNAMICS,
@@ -241,6 +245,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Score open-loop MSE by horizon and write a JSON report",
     )
     _add_predict_args(predict)
+
+    plan = subparsers.add_parser(
+        "plan",
+        help="Plan one clipped action sequence from an observation",
+    )
+    _add_plan_args(plan, closed_loop=False)
+    eval_plan = subparsers.add_parser(
+        "eval-plan",
+        help="Closed-loop planning regret against zero and random doses",
+    )
+    _add_plan_args(eval_plan, closed_loop=True)
     return parser
 
 
@@ -275,6 +290,83 @@ def _add_predict_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="maximum horizon; default scores each episode to its last step",
     )
+    _add_model_config_args(parser)
+
+
+def _add_plan_args(parser: argparse.ArgumentParser, *, closed_loop: bool) -> None:
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="JSON report path",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="checkpoint directory; when set, architecture flags are ignored",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="CEM sample seed; also the weight init seed when --checkpoint is omitted (default: 0)",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=3,
+        help="planning horizon in environment steps (default: 3)",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=8,
+        help="CEM candidates per iteration (default: 8)",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=2,
+        help="CEM iterations (default: 2)",
+    )
+    parser.add_argument(
+        "--elite-fraction",
+        type=float,
+        default=0.25,
+        help="fraction of candidates kept each iteration (default: 0.25)",
+    )
+    if closed_loop:
+        parser.add_argument(
+            "--n-steps",
+            type=int,
+            default=4,
+            help="closed-loop environment steps (default: 4)",
+        )
+        parser.add_argument(
+            "--env-seed",
+            type=int,
+            default=0,
+            help="environment reset seed; also seeds the random baseline (default: 0)",
+        )
+    else:
+        parser.add_argument(
+            "--obs",
+            default=None,
+            help="comma-separated observation; default is the regulation target",
+        )
+        parser.add_argument(
+            "--data",
+            type=Path,
+            default=None,
+            help="corpus whose first observation is the planning state; optional",
+        )
+        parser.add_argument(
+            "--episode",
+            type=int,
+            default=0,
+            help="episode index inside --data (default: 0)",
+        )
     _add_model_config_args(parser)
 
 
@@ -331,6 +423,10 @@ def main(argv: list[str] | None = None) -> int:
         return _train(parser, args)
     if args.command in {"rollout", "eval-predict"}:
         return _predict(parser, args)
+    if args.command == "plan":
+        return _plan(parser, args)
+    if args.command == "eval-plan":
+        return _eval_plan(parser, args)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -535,6 +631,148 @@ def _load_predict_runtime(parser: argparse.ArgumentParser) -> tuple[type, object
             )
         raise
     return world.WorldModel, checkpoint.load_checkpoint, predict_api
+
+
+def _plan(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.checkpoint is not None and not args.checkpoint.exists():
+        parser.error(f"path does not exist: {args.checkpoint}")
+    if args.data is not None and not args.data.exists():
+        parser.error(f"path does not exist: {args.data}")
+    if args.obs is not None and args.data is not None:
+        parser.error("pass only one of --obs and --data")
+    if args.episode < 0:
+        parser.error("--episode must be >= 0")
+    world_model_cls, load_checkpoint, plan_api, torch = _load_plan_runtime(parser)
+    try:
+        model, checkpoint_note = _model_for_plan(args, world_model_cls, load_checkpoint)
+        observation = _plan_observation(args, model.config.obs_dim, plan_api)
+        config = _cem_config_from_args(args, model.config.action_dim, plan_api.CEMConfig)
+        planned = plan_api.plan_actions(
+            model,
+            torch.tensor(observation, dtype=torch.float32),
+            config,
+        )
+        report = plan_api.action_sequence_report(
+            planned,
+            config,
+            observation,
+            checkpoint=checkpoint_note,
+        )
+        plan_api.write_action_sequence(args.out, report)
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(plan_api.format_action_sequence(report))
+    print(f"report: {args.out}")
+    return 0
+
+
+def _eval_plan(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.checkpoint is not None and not args.checkpoint.exists():
+        parser.error(f"path does not exist: {args.checkpoint}")
+    world_model_cls, load_checkpoint, plan_api, _torch = _load_plan_runtime(parser)
+    try:
+        model, checkpoint_note = _model_for_plan(args, world_model_cls, load_checkpoint)
+        config = _cem_config_from_args(args, model.config.action_dim, plan_api.CEMConfig)
+        report = plan_api.planning_regret(
+            model,
+            n_steps=args.n_steps,
+            env_seed=args.env_seed,
+            cem=config,
+            checkpoint=checkpoint_note,
+        )
+        plan_api.write_plan_report(args.out, report)
+    except (TypeError, ValueError, ValidationError, NotImplementedError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(plan_api.format_plan_report(report))
+    print(f"report: {args.out}")
+    return 0
+
+
+def _model_for_plan(
+    args: argparse.Namespace,
+    world_model_cls: type,
+    load_checkpoint: object,
+) -> tuple[object, str | None]:
+    if args.checkpoint is None:
+        model = world_model_cls(_model_config_from_args(args), seed=args.seed)
+        return model, None
+    model = load_checkpoint(args.checkpoint)
+    return model, str(args.checkpoint)
+
+
+def _plan_observation(args: argparse.Namespace, obs_dim: int, plan_api: object) -> list[float]:
+    if args.obs is not None:
+        return _parse_obs(args.obs, obs_dim)
+    if args.data is not None:
+        episodes = load_corpus(args.data)
+        if args.episode >= len(episodes):
+            raise ValueError(f"episode {args.episode} is out of range for {len(episodes)} episodes")
+        episode = episodes[args.episode]
+        if not episode.transitions:
+            raise ValueError("episode has no transitions")
+        observation = list(episode.transitions[0].observation.values)
+        if len(observation) != obs_dim:
+            raise ValueError(
+                f"observation length {len(observation)} does not match obs_dim {obs_dim}"
+            )
+        return observation
+    return list(plan_api.default_target(obs_dim))
+
+
+def _cem_config_from_args(args: argparse.Namespace, action_dim: int, cem_config: type) -> object:
+    low = tuple(-ACTION_LIMIT for _ in range(action_dim))
+    high = tuple(ACTION_LIMIT for _ in range(action_dim))
+    return cem_config(
+        horizon=args.horizon,
+        n_samples=args.samples,
+        n_iterations=args.iterations,
+        elite_fraction=args.elite_fraction,
+        seed=args.seed,
+        action_low=low,
+        action_high=high,
+    )
+
+
+def _parse_obs(text: str, obs_dim: int) -> list[float]:
+    parts = [part.strip() for part in text.split(",")]
+    if not parts or any(part == "" for part in parts):
+        raise ValueError("--obs must be a comma-separated list of numbers")
+    values: list[float] = []
+    for part in parts:
+        try:
+            number = float(part)
+        except ValueError as exc:
+            raise ValueError("--obs must be a comma-separated list of numbers") from exc
+        if not math.isfinite(number):
+            raise ValueError("--obs values must be finite")
+        values.append(number)
+    if len(values) != obs_dim:
+        raise ValueError(f"observation length {len(values)} does not match obs_dim {obs_dim}")
+    return values
+
+
+def _load_plan_runtime(
+    parser: argparse.ArgumentParser,
+) -> tuple[type, object, object, object]:
+    """Import the planner. ``parser.error`` exits when torch is missing."""
+
+    torch, world_model_cls, _summary = _load_model_runtime(parser)
+    try:
+        checkpoint = importlib.import_module("worldforge.models.checkpoint")
+        plan_api = importlib.import_module("worldforge.plan")
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == "torch" or missing.startswith("torch."):
+            parser.error(
+                'model, train, prediction, and planning commands need the optional ml extra: '
+                'pip install -e ".[ml]" '
+                "(a CPU build of torch is enough). "
+                f"Import failed: {exc}"
+            )
+        raise
+    return world_model_cls, checkpoint.load_checkpoint, plan_api, torch
 
 
 def _load_train_runtime(parser: argparse.ArgumentParser) -> tuple[type, object]:
